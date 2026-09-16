@@ -60,6 +60,20 @@ class Settings:
     opensandbox_image: str = field(default_factory=lambda: os.getenv("OPENSANDBOX_IMAGE", "python:3.11-slim"))
     opensandbox_timeout: int | None = field(default_factory=lambda: _optional_int("OPENSANDBOX_TIMEOUT"))
 
+    # OpenSandbox 服务端自动进程管理（由 server.py 拉起）
+    opensandbox_server_enabled: bool = field(
+        default_factory=lambda: os.getenv("OPENSANDBOX_SERVER_ENABLED", "1").lower()
+        in ("1", "true", "yes", "on")
+    )
+    opensandbox_server_command: list[str] = field(
+        default_factory=lambda: os.getenv("OPENSANDBOX_SERVER_CMD", "uvx opensandbox-server")
+        .strip()
+        .split()
+    )
+    opensandbox_server_port: int = field(
+        default_factory=lambda: _optional_int("OPENSANDBOX_SERVER_PORT") or 8080
+    )
+
     # 会话
     user_id: str = field(default_factory=lambda: os.getenv("USER_ID", "demo_user"))
 

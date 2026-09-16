@@ -93,12 +93,25 @@ copy .env.example .env
 
 | 提供方 | MODEL | 需要的环境变量 |
 |---|---|---|
+| **本地 LM Studio（推荐）** | `qwen3-4b-finetuned`（仅模型名） | `OPENAI_BASE_URL=http://localhost:1234/v1` + `OPENAI_API_KEY=lm-studio` |
 | Anthropic | `anthropic:claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
 | OpenAI | `openai:gpt-4o` | `OPENAI_API_KEY` |
 | 火山方舟 ARK | `doubao-seed-1-6`（仅模型名） | `OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/v3` + `OPENAI_API_KEY` |
 | DeepSeek | `deepseek-chat`（仅模型名） | `OPENAI_BASE_URL=https://api.deepseek.com/v1` + `OPENAI_API_KEY` |
 
-可选：设置 `EMBEDDING_MODEL`（如 `openai:text-embedding-3-small`）启用长期记忆**语义检索**；未设置时退化为按更新时间检索。
+**本地 LM Studio 全离线接入**：先在 LM Studio 中加载一个 chat 模型和一个 embedding 模型，然后在 `.env` 中配置：
+
+```env
+MODEL=qwen3-4b-finetuned            # LM Studio 中已加载的 chat 模型名
+OPENAI_BASE_URL=http://localhost:1234/v1   # LM Studio 本地服务
+OPENAI_API_KEY=lm-studio
+
+EMBEDDING_MODEL=text-embedding-qwen3-embedding-0.6b  # embedding 模型名
+EMBEDDING_BASE_URL=http://localhost:1234/v1
+EMBEDDING_API_KEY=lm-studio
+```
+
+设置 `EMBEDDING_MODEL` 即启用长期记忆**语义检索**（本项目用本地 embedding 模型，维度 1024 已适配）；未设置时退化为按更新时间检索。
 
 ### 5. 运行
 
