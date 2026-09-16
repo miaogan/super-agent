@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Agent · SSE Chat</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --border: #2a2f3d;
+    --text: #e6e8ee; --muted: #8b93a7; --accent: #4f8cff;
+    --user: #2b3a55; --ai: #1e2330; --ok: #3fb96f; --warn: #e0a83a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; display: flex;
+  }
+  aside {
+    width: 280px; background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; padding: 16px; gap: 16px; overflow-y: auto;
+  }
+  aside h1 { font-size: 16px; margin-bottom: 4px; }
+  aside .sub { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  section { flex: 1; display: flex; flex-direction: column; height: 100vh; }
+  #messages { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 78%; padding: 10px 14px; border-radius: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 4px; }
+  .msg.ai { align-self: flex-start; background: var(--ai); border-bottom-left-radius: 4px; }
+  .msg.ai.streaming::after { content: "▍"; animation: blink 1s infinite; color: var(--accent); }
+  @keyframes blink { 50% { opacity: 0; } }
+  .event {
+    align-self: flex-start; font-size: 12px; color: var(--muted);
+    background: transparent; border: 1px dashed var(--border); border-radius: 8px;
+    padding: 6px 10px; max-width: 90%;
+  }
+  .event b { color: var(--accent); font-weight: 600; }
+  .event.subagent b { color: var(--warn); }
+  .event.memory b { color: var(--ok); }
+  form { display: flex; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); background: var(--panel); }
+  input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 10px; padding: 12px 14px; font-size: 14px; outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px;
+    padding: 12px 20px; font-size: 14px; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  .card h3 { font-size: 13px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
+  .agent-item { font-size: 13px; margin-bottom: 6px; }
+  .agent-item .name { color: var(--warn); font-weight: 600; }
+  .agent-item .desc { color: var(--muted); font-size: 12px; }
+  .mem-item { font-size: 12px; color: var(--text); padding: 6px 8px; background: var(--panel); border-radius: 6px; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 6px; }
+  .mem-item .del { color: var(--muted); cursor: pointer; } .mem-item .del:hover { color: #ff6b6b; }
+  .row { display: flex; gap: 8px; }
+  .row button { padding: 8px 10px; font-size: 12px; }
+  #thread-info { font-size: 12px; color: var(--muted); }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<aside>
+  <div>
+    <h1>Deep Agent</h1>
+    <div class="sub">deepagents + OpenSandbox + PostgreSQL</div>
+    <div id="thread-info">thread: —</div>
+  </div>
+  <div class="card">
+    <h3>子代理</h3>
+    <div id="agent-list">加载中…</div>
+  </div>
+  <div class="card">
+    <h3>长期记忆</h3>
+    <div id="memory-list">—</div>
+    <div class="row" style="margin-top:8px">
+      <input id="mem-input" placeholder="手动添加记忆…" style="flex:1;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+      <button id="mem-add" style="padding:6px 10px;font-size:12px">+</button>
+    </div>
+  </div>
+  <div class="row">
+    <button id="new-thread" style="flex:1">新建会话</button>
+    <button id="destroy-sandbox" style="flex:1;background:var(--border)">销毁沙箱</button>
+  </div>
+  <div class="hint">提示：试试「用 coder 子代理写个快排并验证」或「记住我喜欢简洁回答」</div>
+</aside>
+
+<section>
+  <div id="messages"></div>
+  <form id="chat-form">
+    <input id="chat-input" placeholder="输入消息，Enter 发送…" autocomplete="off" autofocus>
+    <button id="send" type="submit">发送</button>
+  </form>
+</section>
+
+<script>
+const state = { threadId: null, streaming: false };
+const $ = id => document.getElementById(id);
+
+function addMsg(role, text, streaming=false) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}${streaming ? ' streaming' : ''}`;
+  div.textContent = text;
+  $('messages').appendChild(div);
+  $('messages').scrollTop = $('messages').scrollHeight;
+  return div;
+}
+function addEvent(type, html) {
+  const div = document.createElement('div');
+  div.className = `event ${type}`;
+  div.innerHTML = html;
+  $('messages').appendChild(div);
+  $('messages').scrollTop = $('messages').scrollHeight;
+  return div;
+}
+const esc = s => (s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function loadAgents() {
+  const r = await fetch('/api/agents');
+  const d = await r.json();
+  $('agent-list').innerHTML = d.subagents.map(s =>
+    `<div class="agent-item"><span class="name">${esc(s.name)}</span> · ${esc(s.description)}</div>`
+  ).join('');
+}
+
+async function loadMemories() {
+  const r = await fetch('/api/memories');
+  const d = await r.json();
+  $('memory-list').innerHTML = d.items.length
+    ? d.items.map(m => `<div class="mem-item"><span>${esc(m.text)}</span><span class="del" data-key="${esc(m.key)}">✕</span></div>`).join('')
+    : '<span style="color:var(--muted);font-size:12px">暂无记忆</span>';
+  document.querySelectorAll('.mem-item .del').forEach(el =>
+    el.onclick = async () => { await fetch('/api/memories/' + el.dataset.key, {method:'DELETE'}); loadMemories(); });
+}
+
+async function sendChat(text) {
+  if (state.streaming) return;
+  state.streaming = true; $('send').disabled = true;
+  addMsg('user', text);
+  let aiDiv = null, buf = '';
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ message: text, thread_id: state.threadId })
+    });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      sseBuf += decoder.decode(value, {stream: true});
+      let idx;
+      while ((idx = sseBuf.indexOf('\n\n')) >= 0) {
+        const frame = sseBuf.slice(0, idx); sseBuf = sseBuf.slice(idx + 2);
+        let event = 'message', data = '';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        let payload; try { payload = JSON.parse(data); } catch { continue; }
+        handleEvent(event, payload);
+      }
+    }
+    function handleEvent(event, p) {
+      if (event === 'start') { state.threadId = p.thread_id; $('thread-info').textContent = 'thread: ' + p.thread_id; }
+      else if (event === 'token') {
+        if (!aiDiv) aiDiv = addMsg('ai', '', true);
+        buf += p.content; aiDiv.textContent = buf;
+        $('messages').scrollTop = $('messages').scrollHeight;
+      }
+      else if (event === 'tool_start') addEvent('', `🔧 <b>${esc(p.tool)}</b> ${esc(JSON.stringify(p.args).slice(0, 120))}`);
+      else if (event === 'tool_end') addEvent('', `✅ <b>${esc(p.tool)}</b> 完成：${esc(p.result.slice(0, 140))}`);
+      else if (event === 'subagent_start') addEvent('subagent', `🤖 子代理 <b>${esc(p.agent)}</b> 启动：${esc(p.description)}`);
+      else if (event === 'subagent_end') addEvent('subagent', `🤖 子代理完成：${esc(p.report.slice(0, 160))}`);
+      else if (event === 'memory') { addEvent('memory', `🧠 <b>长期记忆</b> ${esc(p.text)}`); loadMemories(); }
+      else if (event === 'done') { if (aiDiv) aiDiv.classList.remove('streaming'); if (!buf) addMsg('ai', p.content); }
+      else if (event === 'error') { addEvent('', `⚠️ <b>错误</b> ${esc(p.message)}`); if (aiDiv) aiDiv.classList.remove('streaming'); }
+    }
+  } catch (e) {
+    addEvent('', `⚠️ <b>连接错误</b> ${esc(String(e))}`);
+  } finally {
+    state.streaming = false; $('send').disabled = false; $('chat-input').focus();
+  }
+}
+
+$('chat-form').onsubmit = e => {
+  e.preventDefault();
+  const text = $('chat-input').value.trim();
+  if (!text) return;
+  $('chat-input').value = '';
+  sendChat(text);
+};
+$('new-thread').onclick = () => { state.threadId = null; $('thread-info').textContent = 'thread: —'; addEvent('', '🔄 <b>新会话</b>（长期记忆保留）'); };
+$('destroy-sandbox').onclick = async () => {
+  if (!state.threadId) return;
+  await fetch('/api/threads/' + state.threadId + '/sandbox', {method:'DELETE'});
+  addEvent('', '🗑️ 沙箱已销毁，下一条消息将重建');
+};
+$('mem-add').onclick = async () => {
+  const text = $('mem-input').value.trim();
+  if (!text) return;
+  await fetch('/api/memories', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
+  $('mem-input').value = ''; loadMemories();
+};
+
+loadAgents(); loadMemories();
+</script>
+</body>
+</html>

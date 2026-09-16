@@ -1,0 +1,36 @@
+services:
+  # PostgreSQL：多轮对话（checkpointer）+ 长期记忆（store）的持久化后端
+  postgres:
+    image: postgres:16-alpine
+    container_name: agent-postgres
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent_pass
+      POSTGRES_DB: agent_memory
+    ports:
+      - "5432:5432"
+    volumes:
+      - agent_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_memory"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # OpenSandbox 服务端（可选）：
+  # 服务端需要访问宿主机 Docker daemon 来创建沙箱容器，
+  # Windows/macOS 下建议直接在宿主机运行：
+  #   uvx opensandbox-server init-config sandbox.toml --example docker
+  #   uvx opensandbox-server
+  # Linux 下可取消注释以下配置（需挂载 /var/run/docker.sock）
+  # opensandbox:
+  #   image: opensandbox/opensandbox-server:latest
+  #   container_name: agent-opensandbox
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - ./sandbox.toml:/root/.sandbox.toml
+
+volumes:
+  agent_pgdata:
