@@ -122,3 +122,167 @@ class SessionItem(BaseModel):
 
 class SessionListResponse(BaseModel):
     items: list[SessionItem]
+
+
+# ===== V2：Workflow / 版本 / 检查点 =====
+
+
+class WorkflowNodeData(BaseModel):
+    """节点 data：宽松 schema，按 type 解读不同字段。"""
+
+    model: str | None = None
+    system_prompt: str | None = None
+    tools: list[str] | None = None
+    skills: list[str] | None = None
+    tool: str | None = None
+    subagents: list[dict] | None = None
+
+
+class WorkflowNode(BaseModel):
+    """画布节点（与 Vue Flow 对齐）。"""
+
+    id: str
+    type: str
+    data: dict = Field(default_factory=dict)
+    position: dict | None = None
+
+
+class WorkflowEdge(BaseModel):
+    """画布连线。"""
+
+    id: str
+    source: str
+    target: str
+
+
+class WorkflowDefinition(BaseModel):
+    """画布定义：nodes + edges。"""
+
+    nodes: list[WorkflowNode]
+    edges: list[WorkflowEdge]
+
+
+class WorkflowCreateRequest(BaseModel):
+    """POST /api/v2/workflows。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = ""
+    definition: WorkflowDefinition
+
+
+class WorkflowUpdateRequest(BaseModel):
+    """PUT /api/v2/workflows/{id}。
+
+    任意字段缺省 = 不修改；definition 变更会触发新版本。
+    """
+
+    name: str | None = None
+    description: str | None = None
+    definition: WorkflowDefinition | None = None
+    is_deployed: bool | None = None
+
+
+class WorkflowItem(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    description: str
+    active_version: int
+    is_deployed: bool
+    created_at: str
+    updated_at: str
+
+
+class WorkflowListResponse(BaseModel):
+    items: list[WorkflowItem]
+
+
+class WorkflowVersionItem(BaseModel):
+    id: str
+    workflow_id: str
+    version: int
+    definition: str
+    compiled_config: str | None = None
+    created_at: str
+
+
+class WorkflowVersionsResponse(BaseModel):
+    items: list[WorkflowVersionItem]
+
+
+class CompiledConfigResponse(BaseModel):
+    """POST /api/v2/workflows/{id}/compile 产物。"""
+
+    workflow_id: str
+    version: int
+    config: dict
+
+
+class CompileRequest(BaseModel):
+    """直接传 definition 编译（不落库，用于画布实时预览）。"""
+
+    definition: WorkflowDefinition
+
+
+# ===== V2：检查点 =====
+
+
+class CheckpointCreateRequest(BaseModel):
+    """POST /api/v2/threads/{thread_id}/checkpoints。"""
+
+    label: str = Field("", max_length=255)
+    workflow_id: str | None = None
+
+
+class CheckpointItem(BaseModel):
+    id: str
+    tenant_id: str
+    workflow_id: str | None = None
+    source_thread_id: str
+    target_thread_id: str | None = None
+    label: str
+    created_at: str
+
+
+class CheckpointListResponse(BaseModel):
+    items: list[CheckpointItem]
+
+
+class CheckpointRestoreResponse(BaseModel):
+    """POST /api/v2/threads/{thread_id}/checkpoints/{id}/restore。
+
+    回退 = 复制 source_thread 的 langgraph checkpoint 到新 thread_id。
+    """
+
+    checkpoint_id: str
+    source_thread_id: str
+    target_thread_id: str
+
+
+# ===== V2：子代理 sequential 编排 =====
+
+
+class OrchestratorRunRequest(BaseModel):
+    """POST /api/v2/workflows/{id}/orchestrate。
+
+    按当前 active 版本编译出的 subagents 顺序串行执行。
+    """
+
+    task: str = Field(..., min_length=1)
+    context: dict | None = None
+
+
+class OrchestratorStepItem(BaseModel):
+    agent: str
+    step: int
+    input: str
+    output: str
+    ok: bool
+    error: str | None = None
+
+
+class OrchestratorRunResponse(BaseModel):
+    steps: list[OrchestratorStepItem]
+    final_output: str
+    partial: bool
+    error: str | None = None

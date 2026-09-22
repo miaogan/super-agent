@@ -118,6 +118,8 @@ def build_agent(
     user_id: str | None = None,
     model: str | BaseChatModel | None = None,
     skills_dirs: list[str] | None = None,
+    subagents: list[dict] | None = None,
+    system_prompt: str | None = None,
 ):
     """组装 deep agent。
 
@@ -128,19 +130,25 @@ def build_agent(
         user_id: 长期记忆归属用户（默认取配置）。
         model: 覆盖默认模型（测试注入 fake 模型用）。
         skills_dirs: Skill 目录列表（V1：global + tenant 隔离目录）；空则不加载 skill。
+        subagents: V2 子代理列表（来自 CompiledConfig.subagents）；None 时用内置
+            ``SUBAGENTS``。每条需含 ``name`` + ``description``，可选 ``system_prompt``
+            / ``model`` / ``tools``。传入后主 Agent 通过 deepagents 内置 ``task``
+            工具由 LLM 自主派发（与 ``SubagentOrchestrator`` 的确定性串行互补）。
+        system_prompt: V2 覆盖系统提示（来自 CompiledConfig.system_prompt）；
+            None 时用内置 ``SYSTEM_PROMPT``。
     """
     user_id = user_id or settings.user_id
     tools = create_memory_tools(user_id, store) if store is not None else []
     kwargs: dict = dict(
         model=model or load_model(),
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt or SYSTEM_PROMPT,
         tools=tools,
         backend=backend,
         middleware=[
             TodoListMiddleware(),
             MemoryInjectionMiddleware(user_id=user_id),
         ],
-        subagents=SUBAGENTS,
+        subagents=subagents if subagents is not None else SUBAGENTS,
         checkpointer=checkpointer,
         store=store,
     )

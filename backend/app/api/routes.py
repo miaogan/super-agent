@@ -45,6 +45,12 @@ from app.api.schemas import (
     AgentInfo,
     AgentsResponse,
     ChatRequest,
+    CheckpointCreateRequest,
+    CheckpointItem,
+    CheckpointListResponse,
+    CheckpointRestoreResponse,
+    CompiledConfigResponse,
+    CompileRequest,
     HistoryMessage,
     HistoryResponse,
     LoginRequest,
@@ -53,6 +59,9 @@ from app.api.schemas import (
     MemoryCreate,
     MemoryItem,
     MemoriesResponse,
+    OrchestratorRunRequest,
+    OrchestratorRunResponse,
+    OrchestratorStepItem,
     RegisterRequest,
     RegisterResponse,
     SessionItem,
@@ -60,6 +69,12 @@ from app.api.schemas import (
     SkillCreateRequest,
     SkillItem,
     SkillListResponse,
+    WorkflowCreateRequest,
+    WorkflowItem,
+    WorkflowListResponse,
+    WorkflowUpdateRequest,
+    WorkflowVersionItem,
+    WorkflowVersionsResponse,
 )
 from app.auth import (
     TenantContext,
@@ -73,6 +88,9 @@ from app.memory import memory_namespace
 from app.models import (
     Message,
     Session as SessionModel,
+    Workflow as WorkflowModel,
+    WorkflowCheckpoint as WorkflowCheckpointModel,
+    WorkflowVersion as WorkflowVersionModel,
     create_all,
     get_db,
     get_session_factory,
@@ -87,6 +105,12 @@ from app.skill_loader import (
     get_skill_dirs,
     list_skills,
     register_skill,
+)
+from app.workflow import (
+    CompileError,
+    SubagentOrchestrator,
+    compile_workflow,
+    spec_from_compiled,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,6 +133,7 @@ def create_app(
     model_override: Any = None,
     backend_factory: Any = None,
     sandbox_mode: str | None = None,
+    orchestrator_runner: Any = None,
 ) -> FastAPI:
     """构建 FastAPI 应用。
 
@@ -116,6 +141,9 @@ def create_app(
         model_override: 覆盖 LLM（测试注入 fake 模型）。
         backend_factory: 异步工厂 ``(await factory()) -> Backend``（测试注入 FakeSandbox）。
         sandbox_mode: 覆盖沙箱模式（shared/thread）。
+        orchestrator_runner: V2-T4 sequential 编排 runner 注入缝
+            （``async (spec, task, context) -> str``）；缺省 None 用 deepagents 默认 runner。
+            仅供测试；生产链路依赖 LLM。
     """
     from fastapi.middleware.cors import CORSMiddleware
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -146,6 +174,7 @@ def create_app(
         app.state.store = store
         app.state.registry = registry
         app.state.model_override = model_override
+        app.state.orchestrator_runner = orchestrator_runner
         logger.info(
             "API 就绪：model=%s sandbox_mode=%s", model_override or settings.model, registry.mode
         )
@@ -565,7 +594,537 @@ def create_app(
             model=app.state.model_override,
         )
 
+    # ================================================================== #
+    # V2：Workflow CRUD + 编译 + 部署
+    # ================================================================== #
+
+    def _workflow_to_item(wf: WorkflowModel) -> WorkflowItem:
+        return WorkflowItem(
+            id=wf.id,
+            tenant_id=wf.tenant_id,
+            name=wf.name,
+            description=wf.description,
+            active_version=wf.active_version,
+            is_deployed=wf.is_deployed,
+            created_at=wf.created_at.isoformat(),
+            updated_at=wf.updated_at.isoformat(),
+        )
+
+    def _version_to_item(v: WorkflowVersionModel) -> WorkflowVersionItem:
+        return WorkflowVersionItem(
+            id=v.id,
+            workflow_id=v.workflow_id,
+            version=v.version,
+            definition=v.definition,
+            compiled_config=v.compiled_config,
+            created_at=v.created_at.isoformat(),
+        )
+
+    async def _get_active_version(
+        db: AsyncSession, tenant_id: str, workflow_id: str
+    ) -> WorkflowVersionModel:
+        wf = (
+            await db.execute(
+                select(WorkflowModel).where(
+                    WorkflowModel.id == workflow_id,
+                    WorkflowModel.tenant_id == tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if wf is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        ver = (
+            await db.execute(
+                select(WorkflowVersionModel).where(
+                    WorkflowVersionModel.workflow_id == workflow_id,
+                    WorkflowVersionModel.version == wf.active_version,
+                )
+            )
+        ).scalar_one_or_none()
+        if ver is None:
+            raise HTTPException(
+                status_code=500, detail=f"active_version {wf.active_version} 缺失"
+            )
+        return ver
+
+    @app.get("/api/v2/workflows", response_model=WorkflowListResponse)
+    async def workflows_list(
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> WorkflowListResponse:
+        res = await db.execute(
+            select(WorkflowModel)
+            .where(WorkflowModel.tenant_id == ctx.tenant_id)
+            .order_by(WorkflowModel.updated_at.desc())
+        )
+        return WorkflowListResponse(items=[_workflow_to_item(w) for w in res.scalars()])
+
+    @app.post(
+        "/api/v2/workflows",
+        response_model=WorkflowItem,
+        status_code=201,
+    )
+    async def workflows_create(
+        body: WorkflowCreateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> WorkflowItem:
+        # 先编译校验 definition（非法 DAG 直接 400）
+        try:
+            cfg = compile_workflow(body.definition.model_dump())
+        except CompileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        compiled_json = cfg.to_json()
+        def_json = body.definition.model_dump_json()
+        async with db.begin():
+            wf = WorkflowModel(
+                tenant_id=ctx.tenant_id,
+                name=body.name,
+                description=body.description,
+                active_version=1,
+                is_deployed=False,
+            )
+            db.add(wf)
+            await db.flush()
+            db.add(
+                WorkflowVersionModel(
+                    workflow_id=wf.id,
+                    tenant_id=ctx.tenant_id,
+                    version=1,
+                    definition=def_json,
+                    compiled_config=compiled_json,
+                )
+            )
+            await db.flush()
+            await db.refresh(wf)
+        return _workflow_to_item(wf)
+
+    @app.get("/api/v2/workflows/{workflow_id}", response_model=WorkflowItem)
+    async def workflows_get(
+        workflow_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> WorkflowItem:
+        wf = (
+            await db.execute(
+                select(WorkflowModel).where(
+                    WorkflowModel.id == workflow_id,
+                    WorkflowModel.tenant_id == ctx.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if wf is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        return _workflow_to_item(wf)
+
+    @app.put("/api/v2/workflows/{workflow_id}", response_model=WorkflowItem)
+    async def workflows_update(
+        workflow_id: str,
+        body: WorkflowUpdateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> WorkflowItem:
+        async with db.begin():
+            wf = (
+                await db.execute(
+                    select(WorkflowModel).where(
+                        WorkflowModel.id == workflow_id,
+                        WorkflowModel.tenant_id == ctx.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if wf is None:
+                raise HTTPException(status_code=404, detail="workflow not found")
+            if body.name is not None:
+                wf.name = body.name
+            if body.description is not None:
+                wf.description = body.description
+            if body.is_deployed is not None:
+                wf.is_deployed = body.is_deployed
+            # definition 变更 = 新版本
+            if body.definition is not None:
+                try:
+                    cfg = compile_workflow(body.definition.model_dump())
+                except CompileError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                new_ver = wf.active_version + 1
+                wf.active_version = new_ver
+                db.add(
+                    WorkflowVersionModel(
+                        workflow_id=wf.id,
+                        tenant_id=ctx.tenant_id,
+                        version=new_ver,
+                        definition=body.definition.model_dump_json(),
+                        compiled_config=cfg.to_json(),
+                    )
+                )
+            await db.flush()
+            await db.refresh(wf)
+        return _workflow_to_item(wf)
+
+    @app.delete("/api/v2/workflows/{workflow_id}")
+    async def workflows_delete(
+        workflow_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        async with db.begin():
+            wf = (
+                await db.execute(
+                    select(WorkflowModel).where(
+                        WorkflowModel.id == workflow_id,
+                        WorkflowModel.tenant_id == ctx.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if wf is None:
+                raise HTTPException(status_code=404, detail="workflow not found")
+            await db.delete(wf)  # 级联删 versions
+        return {"deleted": workflow_id}
+
+    @app.get(
+        "/api/v2/workflows/{workflow_id}/versions",
+        response_model=WorkflowVersionsResponse,
+    )
+    async def workflows_versions(
+        workflow_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> WorkflowVersionsResponse:
+        # 先校验归属
+        wf = (
+            await db.execute(
+                select(WorkflowModel).where(
+                    WorkflowModel.id == workflow_id,
+                    WorkflowModel.tenant_id == ctx.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if wf is None:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        res = await db.execute(
+            select(WorkflowVersionModel)
+            .where(WorkflowVersionModel.workflow_id == workflow_id)
+            .order_by(WorkflowVersionModel.version.desc())
+        )
+        return WorkflowVersionsResponse(
+            items=[_version_to_item(v) for v in res.scalars()]
+        )
+
+    @app.post(
+        "/api/v2/workflows/{workflow_id}/activate/{version}",
+        response_model=WorkflowItem,
+    )
+    async def workflows_activate(
+        workflow_id: str,
+        version: int,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> WorkflowItem:
+        async with db.begin():
+            wf = (
+                await db.execute(
+                    select(WorkflowModel).where(
+                        WorkflowModel.id == workflow_id,
+                        WorkflowModel.tenant_id == ctx.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if wf is None:
+                raise HTTPException(status_code=404, detail="workflow not found")
+            exists = (
+                await db.execute(
+                    select(WorkflowVersionModel).where(
+                        WorkflowVersionModel.workflow_id == workflow_id,
+                        WorkflowVersionModel.version == version,
+                    )
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                raise HTTPException(status_code=404, detail=f"version {version} 不存在")
+            wf.active_version = version
+            await db.flush()
+            await db.refresh(wf)
+        return _workflow_to_item(wf)
+
+    @app.post(
+        "/api/v2/workflows/compile",
+        response_model=CompiledConfigResponse,
+    )
+    async def workflows_compile_preview(
+        body: CompileRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> CompiledConfigResponse:
+        """实时编译预览（不落库）：画布编辑器边拖边校验。"""
+        try:
+            cfg = compile_workflow(body.definition.model_dump())
+        except CompileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return CompiledConfigResponse(
+            workflow_id="",
+            version=0,
+            config=cfg.to_dict(),
+        )
+
+    @app.get(
+        "/api/v2/workflows/{workflow_id}/config",
+        response_model=CompiledConfigResponse,
+    )
+    async def workflows_compiled_config(
+        workflow_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> CompiledConfigResponse:
+        ver = await _get_active_version(db, ctx.tenant_id, workflow_id)
+        if ver.compiled_config:
+            import json as _json
+
+            cfg = _json.loads(ver.compiled_config)
+        else:
+            # 兜底：现场重编译
+            try:
+                cfg_obj = compile_workflow(ver.definition)
+            except CompileError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            cfg = cfg_obj.to_dict()
+        return CompiledConfigResponse(
+            workflow_id=workflow_id, version=ver.version, config=cfg
+        )
+
+    # ================================================================== #
+    # V2-T4：子代理 sequential 编排 API
+    # ================================================================== #
+
+    @app.post(
+        "/api/v2/workflows/{workflow_id}/orchestrate",
+        response_model=OrchestratorRunResponse,
+    )
+    async def workflows_orchestrate(
+        workflow_id: str,
+        body: OrchestratorRunRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> OrchestratorRunResponse:
+        """按 active 版本的编译产物 sequential 串行执行 subagents。"""
+        ver = await _get_active_version(db, ctx.tenant_id, workflow_id)
+        try:
+            cfg = compile_workflow(ver.definition)
+        except CompileError as exc:  # pragma: no cover - 落库时已校验
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not cfg.subagents:
+            raise HTTPException(
+                status_code=400,
+                detail="当前 workflow 无 subagent 节点，无法 sequential 编排",
+            )
+        orch = SubagentOrchestrator(
+            subagents=spec_from_compiled(cfg.subagents, fallback_model=cfg.model),
+            # 测试缝：app.state.orchestrator_runner 注入 fake runner；
+            # 缺省 None 时用 _default_runner（依赖 deepagents + LLM）
+            runner=getattr(app.state, "orchestrator_runner", None),
+        )
+        result = await orch.run_sequential(
+            body.task, context={**(body.context or {}), "tenant_id": ctx.tenant_id}
+        )
+        return OrchestratorRunResponse(
+            steps=[
+                OrchestratorStepItem(
+                    agent=s.agent,
+                    step=s.step,
+                    input=s.input,
+                    output=s.output,
+                    ok=s.ok,
+                    error=s.error,
+                )
+                for s in result.steps
+            ],
+            final_output=result.final_output,
+            partial=result.partial,
+            error=result.error,
+        )
+
+    # ================================================================== #
+    # V2-T5：检查点 create / list / restore
+    # ================================================================== #
+
+    @app.post(
+        "/api/v2/threads/{thread_id}/checkpoints",
+        response_model=CheckpointItem,
+        status_code=201,
+    )
+    async def checkpoint_create(
+        thread_id: str,
+        body: CheckpointCreateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> CheckpointItem:
+        # 校验 thread 归属（sessions 表 thread_id unique）
+        sess = (
+            await db.execute(
+                select(SessionModel).where(
+                    SessionModel.thread_id == thread_id,
+                    SessionModel.tenant_id == ctx.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if sess is None:
+            raise HTTPException(status_code=404, detail="thread not found")
+        if body.workflow_id:
+            wf = (
+                await db.execute(
+                    select(WorkflowModel).where(
+                        WorkflowModel.id == body.workflow_id,
+                        WorkflowModel.tenant_id == ctx.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if wf is None:
+                raise HTTPException(status_code=400, detail="workflow_id 无效")
+        async with db.begin():
+            ckpt = WorkflowCheckpointModel(
+                tenant_id=ctx.tenant_id,
+                workflow_id=body.workflow_id,
+                source_thread_id=thread_id,
+                label=body.label,
+            )
+            db.add(ckpt)
+            await db.flush()
+            await db.refresh(ckpt)
+        return CheckpointItem(
+            id=ckpt.id,
+            tenant_id=ckpt.tenant_id,
+            workflow_id=ckpt.workflow_id,
+            source_thread_id=ckpt.source_thread_id,
+            target_thread_id=ckpt.target_thread_id,
+            label=ckpt.label,
+            created_at=ckpt.created_at.isoformat(),
+        )
+
+    @app.get(
+        "/api/v2/threads/{thread_id}/checkpoints",
+        response_model=CheckpointListResponse,
+    )
+    async def checkpoint_list(
+        thread_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> CheckpointListResponse:
+        res = await db.execute(
+            select(WorkflowCheckpointModel)
+            .where(
+                WorkflowCheckpointModel.tenant_id == ctx.tenant_id,
+                WorkflowCheckpointModel.source_thread_id == thread_id,
+            )
+            .order_by(WorkflowCheckpointModel.created_at.desc())
+        )
+        return CheckpointListResponse(
+            items=[
+                CheckpointItem(
+                    id=c.id,
+                    tenant_id=c.tenant_id,
+                    workflow_id=c.workflow_id,
+                    source_thread_id=c.source_thread_id,
+                    target_thread_id=c.target_thread_id,
+                    label=c.label,
+                    created_at=c.created_at.isoformat(),
+                )
+                for c in res.scalars()
+            ]
+        )
+
+    @app.post(
+        "/api/v2/threads/{thread_id}/checkpoints/{checkpoint_id}/restore",
+        response_model=CheckpointRestoreResponse,
+    )
+    async def checkpoint_restore(
+        thread_id: str,
+        checkpoint_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> CheckpointRestoreResponse:
+        """回退检查点：复制 source_thread 的 langgraph checkpoint 到新 thread。
+
+        实现：用 langgraph ``AsyncPostgresSaver`` 的底层接口把 source 的全部
+        checkpoint 行复制到 target_thread_id；写入新 thread 后返回新 thread_id，
+        前端后续对话用新 thread_id。
+        """
+        ckpt = (
+            await db.execute(
+                select(WorkflowCheckpointModel).where(
+                    WorkflowCheckpointModel.id == checkpoint_id,
+                    WorkflowCheckpointModel.tenant_id == ctx.tenant_id,
+                    WorkflowCheckpointModel.source_thread_id == thread_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if ckpt is None:
+            raise HTTPException(status_code=404, detail="checkpoint not found")
+        new_thread_id = uuid.uuid4().hex[:12]
+        try:
+            await _copy_langgraph_checkpoints(
+                app.state.checkpointer, thread_id, new_thread_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("checkpoint 复制失败")
+            raise HTTPException(
+                status_code=500, detail=f"checkpoint 复制失败: {exc}"
+            ) from exc
+        async with db.begin():
+            ckpt.target_thread_id = new_thread_id
+            await db.flush()
+        return CheckpointRestoreResponse(
+            checkpoint_id=ckpt.id,
+            source_thread_id=thread_id,
+            target_thread_id=new_thread_id,
+        )
+
     return app
+
+
+# ---------------------------------------------------------------------- #
+# V2-T5 辅助：复制 langgraph checkpoint 行（source → target thread）
+# ---------------------------------------------------------------------- #
+
+
+async def _copy_langgraph_checkpoints(checkpointer, src: str, dst: str) -> None:
+    """把 source thread 的全部 langgraph checkpoint 行复制到 target thread。
+
+    不同 langgraph 版本的 ``AsyncPostgresSaver`` 接口略有差异，本函数优先用
+    公开 ``aget_tuple`` + ``aput`` 走应用层；失败则回退到直接操作底层连接。
+    """
+    try:
+        # 公开接口：aget_tuple 返回最新一条；需要遍历全部历史则用 SQL
+        # 这里先用 SQL 兜底（langgraph 1.2.x 的 AsyncPostgresSaver.conn 暴露 psycopg）
+        conn = getattr(checkpointer, "conn", None) or getattr(
+            checkpointer, "_conn", None
+        )
+        if conn is not None:
+            async with conn.transaction():
+                rows = await conn.execute(
+                    "SELECT checkpoint, metadata, checkpoint_id, parent_checkpoint_id "
+                    "FROM checkpoints WHERE thread_id = %s ORDER BY checkpoint_ts ASC",
+                    (src,),
+                )
+                for row in await rows.fetchall():
+                    await conn.execute(
+                        "INSERT INTO checkpoints "
+                        "(thread_id, checkpoint, metadata, checkpoint_id, parent_checkpoint_id) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (dst, row[0], row[1], row[2], row[3]),
+                    )
+            return
+    except Exception:  # noqa: BLE001  -- 回退到公开接口
+        pass
+
+    # 回退：用 langgraph 公开 aget_tuple / aput（仅复制最新一条状态）
+    latest = await checkpointer.aget_tuple({"configurable": {"thread_id": src}})
+    if latest is None:
+        return
+    await checkpointer.aput(
+        {"configurable": {"thread_id": dst}},
+        latest.checkpoint,
+        latest.metadata,
+        {"source": src, "step": latest.parent_config_id},
+    )
 
 
 # ---------------------------------------------------------------------- #

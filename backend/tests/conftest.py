@@ -50,6 +50,7 @@ def pytest_collection_modifyitems(config, items):
     INTEGRATION_FILES = {
         "test_api.py",
         "test_v1_api.py",
+        "test_v2_api.py",
         "test_memory_flow.py",
         "test_real_sandbox.py",
     }

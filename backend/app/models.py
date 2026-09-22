@@ -152,6 +152,90 @@ class Skill(Base):
 
 
 # ---------------------------------------------------------------------- #
+# V2：Workflow / 版本 / 检查点
+# ---------------------------------------------------------------------- #
+
+
+class Workflow(Base):
+    """Workflow 定义：画布上节点 + 连线的 JSON 快照。
+
+    ``definition`` 存编译器输入：``{"nodes": [...], "edges": [...]}``，
+    节点类型见 ``app/workflow/compiler.py`` 的 NODE_TYPES。
+    每次保存生成新版本（``WorkflowVersion``），主表只存当前 active 版本。
+    """
+
+    __tablename__ = "workflows"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 当前激活版本号（指向 WorkflowVersion.version）
+    active_version: Mapped[int] = mapped_column(default=1, nullable=False)
+    # 是否已部署（部署后可被 /api/chat 调用，按 thread_id 路由）
+    is_deployed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    versions: Mapped[list["WorkflowVersion"]] = relationship(
+        back_populates="workflow", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (Index("ix_workflows_tenant", "tenant_id"),)
+
+
+class WorkflowVersion(Base):
+    """Workflow 版本快照：每次保存生成一条，支持灰度/回滚。"""
+
+    __tablename__ = "workflow_versions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    workflow_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(nullable=False)
+    # 节点 + 连线的 JSON：{"nodes": [...], "edges": [...]}
+    definition: Mapped[str] = mapped_column(Text, nullable=False)
+    # 编译产物缓存：deepagents 配置 JSON（避免每次对话重编译）
+    compiled_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    workflow: Mapped[Workflow] = relationship(back_populates="versions")
+
+    __table_args__ = (
+        Index("ix_wf_versions_wf_ver", "workflow_id", "version", unique=True),
+    )
+
+
+class WorkflowCheckpoint(Base):
+    """会话检查点快照（V2-T5）：基于 langgraph checkpoint 之上的应用层快照。
+
+    langgraph 的 ``AsyncPostgresSaver`` 已持久化完整状态；本表存"命名快照"，
+    便于用户在前端手动创建/回退/列举。回退 = 把 langgraph checkpoint 复制到新 thread。
+    """
+
+    __tablename__ = "workflow_checkpoints"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    workflow_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
+    source_thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 回退时生成的新 thread_id（回退 = 复制 source_thread 的 checkpoint 到新 thread）
+    target_thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    label: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_wf_ckpts_tenant_thread", "tenant_id", "source_thread_id"),
+    )
+
+
+# ---------------------------------------------------------------------- #
 # 引擎 / 会话工厂
 # ---------------------------------------------------------------------- #
 
