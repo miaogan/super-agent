@@ -1,24 +1,48 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import LoginOverlay from '@/components/LoginOverlay.vue'
 import Sidebar from '@/components/Sidebar.vue'
 import ChatPanel from '@/components/ChatPanel.vue'
+import WorkflowBuilder from '@/components/workflow/WorkflowBuilder.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const loggedIn = computed(() => !!auth.token)
+type View = 'chat' | 'workflow'
+const view = ref<View>('chat')
 </script>
 
 <template>
   <LoginOverlay v-if="!loggedIn" />
   <div class="layout" v-else>
-    <Sidebar />
-    <main class="chat-wrap">
+    <Sidebar :view="view" @switch-view="(v) => (view = v)" />
+    <main class="main-wrap">
       <div class="topbar">
-        <span class="me">{{ auth.email }}</span>
-        <button class="ghost small" @click="auth.logout()">退出</button>
+        <div class="view-tabs">
+          <button
+            class="tab"
+            :class="{ on: view === 'chat' }"
+            @click="view = 'chat'"
+          >
+            对话
+          </button>
+          <button
+            class="tab"
+            :class="{ on: view === 'workflow' }"
+            @click="view = 'workflow'"
+          >
+            Workflow 画布
+          </button>
+        </div>
+        <div class="right">
+          <span class="me">{{ auth.email }}</span>
+          <button class="ghost small" @click="auth.logout()">退出</button>
+        </div>
       </div>
-      <ChatPanel />
+      <div class="content">
+        <ChatPanel v-if="view === 'chat'" />
+        <WorkflowBuilder v-else />
+      </div>
     </main>
   </div>
 </template>
@@ -28,21 +52,49 @@ const loggedIn = computed(() => !!auth.token)
   display: flex;
   height: 100vh;
 }
-.chat-wrap {
+.main-wrap {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 .topbar {
-  padding: 8px 16px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border);
   display: flex;
-  justify-content: flex-end;
-  gap: 12px;
+  justify-content: space-between;
   align-items: center;
+  gap: 12px;
   font-size: 12px;
   color: var(--muted);
   background: var(--panel);
+  height: 44px;
+  flex-shrink: 0;
+}
+.view-tabs {
+  display: flex;
+  gap: 4px;
+}
+.tab {
+  padding: 6px 16px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.tab:hover {
+  color: var(--text);
+}
+.right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .topbar .me {
   color: var(--text);
@@ -50,5 +102,10 @@ const loggedIn = computed(() => !!auth.token)
 .small {
   padding: 4px 10px;
   font-size: 11px;
+}
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 </style>

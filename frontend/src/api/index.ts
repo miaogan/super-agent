@@ -2,11 +2,19 @@
 
 import type {
   AgentsResponse,
+  CheckpointCreateRequest,
+  CheckpointItem,
+  CheckpointListResponse,
+  CheckpointRestoreResponse,
+  CompileRequest,
+  CompiledConfigResponse,
   HistoryResponse,
   LoginRequest,
   LoginResponse,
   MemoriesResponse,
   MemoryItem,
+  OrchestratorRunRequest,
+  OrchestratorRunResponse,
   RegisterRequest,
   RegisterResponse,
   SessionListResponse,
@@ -14,6 +22,12 @@ import type {
   SkillItem,
   SkillListResponse,
   SseEvent,
+  WorkflowCreateRequest,
+  WorkflowDefinition,
+  WorkflowItem,
+  WorkflowListResponse,
+  WorkflowUpdateRequest,
+  WorkflowVersionsResponse,
 } from '@/types'
 
 const TOKEN_KEY = 'access_token'
@@ -207,4 +221,141 @@ export async function streamChat(
       onEvent({ event, data: payload } as SseEvent)
     }
   }
+}
+
+// ----- V2：Workflow CRUD + 编译 + 编排 + 检查点 -----
+
+export async function listWorkflows(): Promise<WorkflowListResponse> {
+  const r = await fetch('/api/v2/workflows', { headers: authHeaders() })
+  return handle<WorkflowListResponse>(r)
+}
+
+export async function getWorkflow(id: string): Promise<WorkflowItem> {
+  const r = await fetch('/api/v2/workflows/' + encodeURIComponent(id), {
+    headers: authHeaders(),
+  })
+  return handle<WorkflowItem>(r)
+}
+
+export async function createWorkflow(req: WorkflowCreateRequest): Promise<WorkflowItem> {
+  const r = await fetch('/api/v2/workflows', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(req),
+  })
+  return handle<WorkflowItem>(r)
+}
+
+export async function updateWorkflow(
+  id: string,
+  req: WorkflowUpdateRequest,
+): Promise<WorkflowItem> {
+  const r = await fetch('/api/v2/workflows/' + encodeURIComponent(id), {
+    method: 'PUT',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(req),
+  })
+  return handle<WorkflowItem>(r)
+}
+
+export async function deleteWorkflow(id: string): Promise<void> {
+  const r = await fetch('/api/v2/workflows/' + encodeURIComponent(id), {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  if (!r.ok) throw new Error('删除失败')
+}
+
+export async function listWorkflowVersions(id: string): Promise<WorkflowVersionsResponse> {
+  const r = await fetch('/api/v2/workflows/' + encodeURIComponent(id) + '/versions', {
+    headers: authHeaders(),
+  })
+  return handle<WorkflowVersionsResponse>(r)
+}
+
+export async function activateWorkflowVersion(
+  id: string,
+  version: number,
+): Promise<WorkflowItem> {
+  const r = await fetch(
+    `/api/v2/workflows/${encodeURIComponent(id)}/activate/${version}`,
+    { method: 'POST', headers: authHeaders() },
+  )
+  return handle<WorkflowItem>(r)
+}
+
+/** 实时编译预览（不落库）：画布编辑器边拖边校验 */
+export async function compilePreview(
+  req: CompileRequest,
+): Promise<CompiledConfigResponse> {
+  const r = await fetch('/api/v2/workflows/compile', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(req),
+  })
+  return handle<CompiledConfigResponse>(r)
+}
+
+/** 读取已落库 workflow 的 active 版本编译产物 */
+export async function getCompiledConfig(
+  id: string,
+): Promise<CompiledConfigResponse> {
+  const r = await fetch('/api/v2/workflows/' + encodeURIComponent(id) + '/config', {
+    headers: authHeaders(),
+  })
+  return handle<CompiledConfigResponse>(r)
+}
+
+/** sequential 编排：按 active 版本编译产物串行执行 subagents */
+export async function orchestrateWorkflow(
+  id: string,
+  req: OrchestratorRunRequest,
+): Promise<OrchestratorRunResponse> {
+  const r = await fetch(
+    '/api/v2/workflows/' + encodeURIComponent(id) + '/orchestrate',
+    {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(req),
+    },
+  )
+  return handle<OrchestratorRunResponse>(r)
+}
+
+// ----- V2：检查点 -----
+
+export async function createCheckpoint(
+  threadId: string,
+  req: CheckpointCreateRequest,
+): Promise<CheckpointItem> {
+  const r = await fetch(
+    '/api/v2/threads/' + encodeURIComponent(threadId) + '/checkpoints',
+    {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(req),
+    },
+  )
+  return handle<CheckpointItem>(r)
+}
+
+export async function listCheckpoints(
+  threadId: string,
+): Promise<CheckpointListResponse> {
+  const r = await fetch(
+    '/api/v2/threads/' + encodeURIComponent(threadId) + '/checkpoints',
+    { headers: authHeaders() },
+  )
+  return handle<CheckpointListResponse>(r)
+}
+
+export async function restoreCheckpoint(
+  threadId: string,
+  checkpointId: string,
+): Promise<CheckpointRestoreResponse> {
+  const r = await fetch(
+    `/api/v2/threads/${encodeURIComponent(threadId)}/checkpoints/${encodeURIComponent(checkpointId)}/restore`,
+    { method: 'POST', headers: authHeaders() },
+  )
+  return handle<CheckpointRestoreResponse>(r)
 }

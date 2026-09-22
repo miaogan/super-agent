@@ -3,6 +3,10 @@ import { onMounted, ref } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import * as api from '@/api'
 
+type View = 'chat' | 'workflow'
+const props = defineProps<{ view?: View }>()
+const emit = defineEmits<{ switchView: [View] }>()
+
 const chat = useChatStore()
 
 // Skill 上传表单
@@ -144,6 +148,23 @@ onMounted(() => {
         销毁沙箱
       </button>
     </div>
+
+    <div class="row view-switch">
+      <button
+        class="ghost"
+        :class="{ on: props.view === 'chat' }"
+        @click="emit('switchView', 'chat')"
+      >
+        对话
+      </button>
+      <button
+        class="ghost"
+        :class="{ on: props.view === 'workflow' }"
+        @click="emit('switchView', 'workflow')"
+      >
+        画布
+      </button>
+    </div>
   </aside>
 </template>
 
@@ -274,4 +295,8 @@ summary {
   padding: 6px 10px;
   font-size: 12px;
 }
-</style>
+.view-switch button.on {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}</style>
