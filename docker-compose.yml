@@ -1,8 +1,8 @@
 services:
-  # PostgreSQL：多轮对话（checkpointer）+ 长期记忆（store）+ V1 多租户表的持久化后端
+  # PostgreSQL：多轮对话（checkpointer）+ 长期记忆（store）+ 多租户表的持久化后端
   postgres:
     image: postgres:16-alpine
-    container_name: agent-postgres
+    container_name: agentforge-postgres
     environment:
       POSTGRES_USER: agent
       POSTGRES_PASSWORD: agent_pass
@@ -17,11 +17,10 @@ services:
       timeout: 3s
       retries: 10
 
-  # V1：FastAPI + 前端一体化容器
-  # 本地开发可直接 `python server.py`；docker 形式方便一键部署
-  app:
-    build: .
-    container_name: agentforge-app
+  # FastAPI 后端：纯 API 服务（不再托管前端静态页）
+  backend:
+    build: ./backend
+    container_name: agentforge-backend
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,11 +35,21 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       SKILLS_DIR: ${SKILLS_DIR:-skills}
       SANDBOX_MODE: ${SANDBOX_MODE:-shared}
+      CORS_ORIGINS: "http://localhost:5173,http://localhost:8080,http://frontend"
     ports:
       - "8000:8000"
     volumes:
-      - ./skills:/app/skills
-      - ./.env:/app/.env:ro
+      - ./backend/skills:/app/skills
+      - ./backend/.env:/app/.env:ro
+
+  # 前端：Vite + Vue3 + TS，构建后由 nginx 托管 + 反代 /api
+  frontend:
+    build: ./frontend
+    container_name: agentforge-frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
 
   # OpenSandbox 服务端（可选）：
   # 服务端需要访问宿主机 Docker daemon 来创建沙箱容器，

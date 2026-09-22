@@ -30,11 +30,10 @@ import logging
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -92,7 +91,6 @@ from app.skill_loader import (
 
 logger = logging.getLogger(__name__)
 
-_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 _TOOL_PREVIEW_CHARS = 300
 
 
@@ -119,6 +117,7 @@ def create_app(
         backend_factory: 异步工厂 ``(await factory()) -> Backend``（测试注入 FakeSandbox）。
         sandbox_mode: 覆盖沙箱模式（shared/thread）。
     """
+    from fastapi.middleware.cors import CORSMiddleware
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     from langgraph.store.postgres.aio import AsyncPostgresStore
 
@@ -157,15 +156,35 @@ def create_app(
             await stack.aclose()
             await close_engine()
 
-    app = FastAPI(title="super-agent API", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="super-agent API", version="0.4.0", lifespan=lifespan)
+
+    # CORS：允许前端 dev server（Vite 默认 5173）和容器化部署的 frontend 域访问
+    allowed_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://frontend:80",
+    ]
+    # 额外放行环境变量配置的 origin（逗号分隔）
+    import os
+
+    extra = os.getenv("CORS_ORIGINS", "")
+    if extra:
+        allowed_origins.extend(
+            o.strip() for o in extra.split(",") if o.strip()
+        )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
 
     # ------------------------------------------------------------------ #
-    # 静态页
+    # 健康检查
     # ------------------------------------------------------------------ #
-
-    @app.get("/", include_in_schema=False)
-    async def index():
-        return FileResponse(_STATIC_DIR / "index.html")
 
     @app.get("/api/health")
     async def health() -> dict:

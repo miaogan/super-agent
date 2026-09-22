@@ -1,11 +1,27 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+
+# 环境配置
+backend/.env
 .env
 sandbox.toml
 .opensandbox/
+
+# 日志
 *.log
+
+# 前端构建产物
+frontend/dist/
+frontend/node_modules/
+# vue-tsc 增量编译产物
+frontend/*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
+
 # Trae IDE 自动生成的 HTML 分享包
 .trae-html-share-packages/
+
 # V1 Skill 文件目录（运行时生成，不入库）
-skills/
+backend/skills/
