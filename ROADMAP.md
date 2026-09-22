@@ -149,8 +149,8 @@
 | **V2.5-T1** 条件分支节点 | `if`/`switch` 节点 + 表达式求值器 + 编译器扩展 + 前端节点面板 | 1 周 | V2-T2 | 高 |
 | **V2.5-T2** 人机协同（HIL） | `interrupt()` + 恢复 + 审批节点 + 前端审批 UI（挂起→人工确认→续跑） | 1 周 | V2-T5 | 高 |
 | **V2.5-T3** 并行子代理 | `fan-out`/`fan-in` + 结果合并策略（first/all/merge） | 5 天 | V2-T4 | 中 |
-| **V2.5-T4** RAG 基础 | pgvector 扩展 + 文档上传/解析/分块 + 向量索引 + 检索工具 | 1 周 | V2-T11 | 高 |
-| **V2.5-T5** 混合检索 | 向量 + BM25 关键词 + cross-encoder 重排 + 引用溯源 | 5 天 | T4 | 高 |
+| **V2.5-T4** LightRAG 集成 + Milvus + KG | LightRAG 接入 + Milvus 向量后端 + 双层检索（low-level 向量 + high-level 知识图谱）+ 增量更新 | 5 天 | V2-T11 | 高 |
+| **V2.5-T5** 多模态 RAG + 引用溯源 | RAG-Anything 多模态集成（MinerU 解析 PDF/图片/表格/公式）+ reranker 重排 + citation 引用 | 5 天 | T4 | 高 |
 | **V2.5-T6** MCP 协议支持 | MCP client + 工具自动发现 + 安全沙箱（限定工具能力域） | 1 周 | — | 高 |
 | **V2.5-T7** 工具市场骨架 | 插件 manifest + 注册中心 + 一键安装 + 权限校验 | 5 天 | T6 | 中 |
 | **V2.5-T8** 配额与限流 | QPS / Token / 调用次数 + 租户级配额 + Redis 令牌桶 | 5 天 | V2 多租户 | 高 |
@@ -165,8 +165,9 @@
 - ✅ 画布拖出 `start → if(条件) → agent_A / agent_B → merge → end`，按条件分流
 - ✅ 审批节点：Agent 产出方案 → 挂起 → 人工审批 → 通过则续跑，拒绝则走 fallback 分支
 - ✅ 并行子代理：3 个 agent 并行执行，fan-in 取 first/all/merge
-- ✅ 上传 PDF/Word/Markdown → 自动分块 → 向量索引 → 对话引用原文片段
-- ✅ 混合检索：向量召回 + BM25 关键词 + cross-encoder 重排，返回带引用的回答
+- ✅ 上传 PDF/图片/Office/公式 → LightRAG + MinerU 自动解析分块 → Milvus 向量索引 + 知识图谱构建 → 对话引用原文片段
+- ✅ 双层检索：LightRAG low-level 向量召回（Milvus）+ high-level 知识图谱多跳推理，返回带 citation 引用的回答
+- ✅ 多模态：图片/表格/公式经 MinerU 解析后可被检索并引用
 - ✅ 接入 MCP server，自动发现工具并注册为 Agent 可用工具
 - ✅ 工具市场：安装插件 → manifest 校验 → 权限确认 → 工具可用
 - ✅ 租户配额：超过 QPS/Token 上限返回 429，审计日志记录全部关键操作
@@ -179,7 +180,7 @@
 
 - **条件分支用表达式求值器**（如 `eval_ex`），不引入完整 DSL，保持编译器简单
 - **HIL 复用 LangGraph `interrupt()`**，不自研挂起/恢复机制
-- **RAG 用 pgvector**（PostgreSQL 扩展），不引入独立向量库，保持单库
+- **RAG 用 LightRAG + Milvus**：不自建 RAG 引擎，直接复用 LightRAG（双层检索：low-level 向量 + high-level 知识图谱）。RAG-Anything 已于 2026.05 合并入 LightRAG，作为多模态解析层（MinerU）。Milvus 作为向量后端（LightRAG 原生支持 pymilvus），不引入独立向量库，保持单一职责
 - **MCP 优先于 A2A**：MCP 已有参考实现，A2A spec 仍在演进（留 V3）
 - **配额用 Redis 令牌桶**，不用数据库计数（性能 + 实时性）
 - **K8s 优先于微服务拆分**：先解决部署可生产性，再解决架构可扩展性
@@ -192,7 +193,7 @@
 V2-T2 编译器 ───────┤                 │             │
                     └── T2 HIL ───────┘             │
                                                      │
-V2-T11 记忆 ──────── T4 RAG 基础 ─── T5 混合检索 ────┤
+V2-T11 记忆 ──────── T4 LightRAG+Milvus+KG ─── T5 多模态RAG+引用 ─┤
                                                      ├── T13 E2E 联调
                      T6 MCP ────────── T7 工具市场 ──┤
                                                      │
