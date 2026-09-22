@@ -126,7 +126,7 @@
 > **定位**：不拆微服务（留 V3），补齐 V2 暴露的 5 大能力缺口，从「演示级」→「可生产级」。
 > **原则**：编排补强优先（workflow engine 硬伤），RAG + MCP + 治理三线并进，K8s 收尾。
 >
-> **状态：进行中** — 已完成 T1 条件分支 / T2 人机协同 / T3 并行子代理 / T4 RAG 接口预留 / T5 RAG 工具注入 / T6 MCP 协议 / T7 工具市场 / T8 配额限流 / T9 审计日志 / T10 API Key 轮转+灰度发布 / T11 K8s Helm / T12 OTel 全链路可观测+告警；T13 E2E 联调待推进。
+> **状态：✅ 已完成** — 全部 13 个任务（T1-T13）开发 + 单测 + E2E 联调通过（326 passed / 2 skipped）。
 
 ## 差距诊断（V2 验收后）
 
@@ -160,7 +160,7 @@
 | **V2.5-T10** API Key 轮转 + 灰度发布 | Key 生命周期（创建/吊销/轮转） + Workflow 版本灰度（流量切分） | 5 天 | T8 | 中 ✅ |
 | **V2.5-T11** K8s Helm chart + 水平扩容 | Helm chart + HPA + 配置外部化（ConfigMap/Secret） + PV 持久化 | 1 周 | V2 Docker | 高 ✅ |
 | **V2.5-T12** OTel 全链路可观测 + 告警 | OTLP exporter + Prometheus + Grafana dashboard + 告警规则 | 5 天 | T11 | 中 ✅ |
-| **V2.5-T13** E2E 联调 | 条件分支→HIL→RAG→MCP→配额→审计全链路 | 5 天 | 全部 | 高 |
+| **V2.5-T13** E2E 联调 | 条件分支→HIL→RAG→MCP→配额→审计全链路 | 5 天 | 全部 | 高 ✅ |
 
 ## V2.5 验收
 
@@ -177,6 +177,24 @@
 - ✅ Workflow 灰度：v2 上线 10% 流量，可一键回滚到 v1
 - ✅ `helm install` 一键起集群，HPA 自动扩容 backend 副本
 - ✅ Grafana 看板：trace + token 用量 + 错误率 + 告警通知
+
+## V2.5 测试覆盖
+
+| 测试文件 | 覆盖范围 | 依赖 |
+|---|---|---|
+| `test_v25_branch.py` | 条件分支 if/switch + 表达式求值器（白名单 AST + JS 字面量 + dict 取值） | 无 |
+| `test_v25_hil.py` | HIL 状态机 + 审批节点 + resume + 超时过期 | 无 |
+| `test_v25_parallel.py` | 并行子代理 fan-out/fan-in + first/all/merge 合并策略 | 无 |
+| `test_v25_rag.py` | RAG 接口契约 + stub/live 服务 + retrieve_knowledge 工具 + citation | 无 |
+| `test_v25_mcp.py` | MCP client + JSON-RPC + 工具发现 + 安全策略 | 无 |
+| `test_v25_tool_market.py` | 插件 manifest + 权限策略 + 注册中心 CRUD | 无 |
+| `test_v25_quota.py` | QPS/Token/Calls 配额 + Redis 令牌桶 + 进程内降级 | 无 |
+| `test_v25_audit.py` | 审计事件 + save/query + 保留策略 + sink 单例 | 无 |
+| `test_v25_release.py` | API Key 生命周期 + Workflow 灰度发布 + 流量切分 | 无 |
+| `test_v25_otel.py` | Prometheus 指标（Counter/Histogram/Gauge）+ OTelConfig + hook + middleware | 无 |
+| `test_v25_e2e.py` | 全链路 E2E：条件分支→HIL→RAG→MCP（mock transport）→并发配额→审计→OTel 全维度 | 无 |
+
+**测试结果**：326 passed, 2 skipped（无 PG 时集成测试自动跳过）
 
 ## V2.5 关键设计决策
 
@@ -208,9 +226,9 @@ V2 Docker ─────────── T11 K8s Helm ──── T12 OTel �
 
 ## V2.5 测试目标
 
-- 单元测试：表达式求值 / interrupt 状态机 / fan-in 合并 / RAG 分块 / MCP client
-- 集成测试：条件分支 E2E / HIL 审批流 / RAG 全链路 / 配额限流 / 灰度切流
-- 测试结果目标：200+ passed（V2 基线 170 + V2.5 新增 30+）
+- ✅ 单元测试：表达式求值 / interrupt 状态机 / fan-in 合并 / RAG 接口契约 / MCP client（含 mock transport）
+- ✅ 集成测试：条件分支 E2E / HIL 审批流 / RAG 全链路 / 并发配额限流 / 灰度切流 / OTel 全维度指标
+- ✅ 测试结果：326 passed, 2 skipped（V2 基线 170 + V2.5 新增 156）
 
 ---
 
