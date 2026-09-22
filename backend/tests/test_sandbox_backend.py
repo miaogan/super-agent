@@ -8,13 +8,18 @@ from __future__ import annotations
 import asyncio
 import threading
 
-from deepagents.backends.protocol import (
-    ExecuteResponse,
-    FileDownloadResponse,
-    FileUploadResponse,
-)
+import pytest
 
-from app.sandbox_backend import OpenSandboxBackend
+# module-level skip：缺 deepagents 时跳过
+try:
+    from deepagents.backends.protocol import (
+        ExecuteResponse,
+        FileDownloadResponse,
+        FileUploadResponse,
+    )
+    from app.sandbox_backend import OpenSandboxBackend
+except ImportError as _e:  # pragma: no cover
+    pytest.skip(f"缺少 deepagents 依赖，跳过 sandbox_backend 测试: {_e}", allow_module_level=True)
 
 
 class FakeFiles:

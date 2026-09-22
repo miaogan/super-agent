@@ -206,10 +206,16 @@ async def get_db() -> AsyncIterator[AsyncSession]:
         yield session
 
 
-async def get_session_factory() -> async_sessionmaker[AsyncSession]:
-    """供非请求上下文（如后台任务）获取 sessionmaker。"""
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """供非请求上下文（如后台任务）获取 sessionmaker（同步，只读全局变量）。
+
+    业务层必须先在 startup 阶段调用 ``await init_engine()`` 初始化全局 engine；
+    若未初始化直接抛 ``RuntimeError``，避免在事件循环内同步阻塞初始化。
+    """
     if _sessionmaker is None:
-        await init_engine()
+        raise RuntimeError(
+            "sessionmaker 未初始化；请先在应用 startup 调用 await init_engine()"
+        )
     return _sessionmaker
 
 

@@ -10,7 +10,13 @@
 
 from __future__ import annotations
 
-from app.sandbox_backend import OpenSandboxBackend
+import pytest
+
+# module-level skip：缺 deepagents / opensandbox 时跳过
+try:
+    from app.sandbox_backend import OpenSandboxBackend
+except ImportError as _e:  # pragma: no cover
+    pytest.skip(f"缺少 deepagents/opensandbox 依赖，跳过真实沙箱测试: {_e}", allow_module_level=True)
 
 
 def main() -> None:

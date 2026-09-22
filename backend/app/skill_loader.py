@@ -106,18 +106,26 @@ def _read_skill_file(file_path: Path) -> tuple[dict[str, str], str] | None:
 
 
 def _scan_dir(dir_path: Path, is_global: bool, tenant_id: str | None) -> list[SkillMeta]:
-    """扫描一个目录下的全部 skill 子目录。"""
+    """扫描一个目录下的全部 skill 子目录。
+
+    对每个子目录做 ``_safe_resolve`` 校验，防止符号链接逃逸出 ``skills_dir``。
+    """
     out: list[SkillMeta] = []
     if not dir_path.is_dir():
         return out
+    base = _skills_base()
     for child in dir_path.iterdir():
         if not child.is_dir():
             continue
         name = child.name
         if not _SKILL_NAME_RE.match(name):
             continue
+        # 防符号链接逃逸：resolve 后必须仍在 skills_dir 内
+        if _safe_resolve(child, base) is None:
+            logger.warning("跳过逃逸 skills_dir 的路径: %s", child)
+            continue
         skill_file = child / _SKILL_FILENAME
-        if not skill_file.is_file():
+        if _safe_resolve(skill_file, base) is None or not skill_file.is_file():
             continue
         parsed = _read_skill_file(skill_file)
         if parsed is None:

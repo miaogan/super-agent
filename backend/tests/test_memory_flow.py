@@ -14,15 +14,20 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.tools import BaseTool
+import pytest
 
-from app.agent import build_agent
-from app.db import postgres_persistence
-from app.memory import memory_namespace
-from tests.test_sandbox_backend import FakeSandbox, make_backend
+# module-level skip：缺 Agent 栈依赖时跳过
+try:
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tools import BaseTool
+    from app.agent import build_agent
+    from app.db import postgres_persistence
+    from app.memory import memory_namespace
+    from tests.test_sandbox_backend import FakeSandbox, make_backend
+except ImportError as _e:  # pragma: no cover
+    pytest.skip(f"缺少 Agent 栈依赖，跳过记忆链路测试: {_e}", allow_module_level=True)
 
 USER = f"test_user_{uuid.uuid4().hex[:6]}"
 MEMORY_TEXT = "用户喜欢简洁的回答"

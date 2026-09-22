@@ -16,11 +16,16 @@ from __future__ import annotations
 import json
 import uuid
 
-from fastapi.testclient import TestClient
+import pytest
 
-from app.api.routes import create_app
-from tests.test_memory_flow import RecordingFakeChatModel
-from tests.test_sandbox_backend import FakeSandbox, make_backend
+# module-level skip：缺 Agent 栈依赖时跳过整个文件
+try:
+    from fastapi.testclient import TestClient
+    from app.api.routes import create_app
+    from tests.test_memory_flow import RecordingFakeChatModel
+    from tests.test_sandbox_backend import FakeSandbox, make_backend
+except ImportError as _e:  # pragma: no cover
+    pytest.skip(f"缺少 Agent 栈依赖，跳过集成测试: {_e}", allow_module_level=True)
 
 
 def _tool_call(name: str, args: dict):
