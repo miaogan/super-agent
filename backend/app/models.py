@@ -236,6 +236,134 @@ class WorkflowCheckpoint(Base):
 
 
 # ---------------------------------------------------------------------- #
+# V2-T8：评测面板
+# ---------------------------------------------------------------------- #
+
+
+class TestCase(Base):
+    """评测用例（golden set）。
+
+    - 关联 workflow_id 时按该 workflow 跑；为空时按默认 agent 跑。
+    - ``expected`` 是 golden 期望输出（用于断言包含或相似度）。
+    - ``actual`` + ``passed`` 在每次运行时回写（保留最后一次运行结果）。
+    """
+
+    __tablename__ = "test_cases"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    workflow_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    input: Mapped[str] = mapped_column(Text, nullable=False)
+    expected: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 断言方式：contains / regex / similarity（默认 contains）
+    assertion: Mapped[str] = mapped_column(String(32), default="contains", nullable=False)
+    # 最后一次运行结果（回写）
+    actual: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_test_cases_tenant", "tenant_id"),
+        Index("ix_test_cases_workflow", "workflow_id"),
+    )
+
+
+class TestRun(Base):
+    """单次评测运行记录（一次跑多个 case）。
+
+    - 记录批次通过率、总耗时、token 用量。
+    - ``case_results`` 为 JSON 数组：``[{case_id, passed, actual, error}]``。
+    """
+
+    __tablename__ = "test_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    workflow_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
+    total: Mapped[int] = mapped_column(default=0, nullable=False)
+    passed: Mapped[int] = mapped_column(default=0, nullable=False)
+    case_results: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    elapsed_ms: Mapped[int] = mapped_column(default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (Index("ix_test_runs_tenant", "tenant_id"),)
+
+
+# ---------------------------------------------------------------------- #
+# V2-T9：可观测性（trace）
+# ---------------------------------------------------------------------- #
+
+
+class Trace(Base):
+    """对话级 trace（OpenTelemetry 兜底）。
+
+    - ``thread_id`` 关联会话；``workflow_id`` 关联 workflow（用 workflow 跑时）。
+    - ``span_count`` = trace 内 span 总数；``duration_ms`` 为整条 trace 耗时。
+    - ``events`` 为 JSON 数组：``[{ts, name, attrs}]``。
+    """
+
+    __tablename__ = "traces"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
+    span_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(default=0, nullable=False)
+    token_input: Mapped[int] = mapped_column(default=0, nullable=False)
+    token_output: Mapped[int] = mapped_column(default=0, nullable=False)
+    # 状态：ok / error
+    status: Mapped[str] = mapped_column(String(16), default="ok", nullable=False)
+    events: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_traces_tenant", "tenant_id"),
+        Index("ix_traces_thread", "thread_id"),
+        Index("ix_traces_created", "created_at"),
+    )
+
+
+# ---------------------------------------------------------------------- #
+# V2-T10：Prompt 版本管理
+# ---------------------------------------------------------------------- #
+
+
+class Prompt(Base):
+    """Prompt 版本管理（按 tenant + key 隔离）。
+
+    - ``key`` 是 prompt 的稳定标识（如 ``"default_agent"`` / ``"coder_subagent"``）。
+    - ``version`` 自增；``is_active`` 标记当前生效版本。
+    - ``content`` 是 prompt 全文；``change_note`` 是版本变更说明。
+    """
+
+    __tablename__ = "prompts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    key: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[int] = mapped_column(default=1, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    change_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    __table_args__ = (
+        Index("ix_prompts_tenant_key", "tenant_id", "key"),
+        Index("ix_prompts_active", "tenant_id", "key", "is_active"),
+    )
+
+
+# ---------------------------------------------------------------------- #
 # 引擎 / 会话工厂
 # ---------------------------------------------------------------------- #
 

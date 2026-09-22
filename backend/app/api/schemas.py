@@ -286,3 +286,153 @@ class OrchestratorRunResponse(BaseModel):
     final_output: str
     partial: bool
     error: str | None = None
+
+
+# ===== V2-T8：评测面板 =====
+
+
+class TestCaseCreateRequest(BaseModel):
+    """POST /api/v2/tests。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    input: str = Field(..., min_length=1)
+    expected: str = ""
+    assertion: str = "contains"  # contains / regex / similarity
+    workflow_id: str | None = None
+
+
+class TestCaseUpdateRequest(BaseModel):
+    name: str | None = None
+    input: str | None = None
+    expected: str | None = None
+    assertion: str | None = None
+    workflow_id: str | None = None
+
+
+class TestCaseItem(BaseModel):
+    id: str
+    tenant_id: str
+    workflow_id: str | None = None
+    name: str
+    input: str
+    expected: str
+    assertion: str
+    actual: str
+    passed: bool | None = None
+    run_at: str | None = None
+    created_at: str
+
+
+class TestCaseListResponse(BaseModel):
+    items: list[TestCaseItem]
+
+
+class TestRunRequest(BaseModel):
+    """POST /api/v2/tests/run。
+
+    workflow_id 为空时按默认 Agent 跑；筛选 case_ids 时只跑指定 case。
+    """
+
+    workflow_id: str | None = None
+    case_ids: list[str] | None = None
+
+
+class TestRunItem(BaseModel):
+    id: str
+    tenant_id: str
+    workflow_id: str | None = None
+    total: int
+    passed: int
+    pass_rate: float
+    case_results: str
+    elapsed_ms: int
+    created_at: str
+
+
+class TestRunListResponse(BaseModel):
+    items: list[TestRunItem]
+
+
+class TestRunResponse(TestRunItem):
+    """POST /api/v2/tests/run 的响应（含详细 case_results）。"""
+
+
+# ===== V2-T9：可观测性（trace） =====
+
+
+class TraceItem(BaseModel):
+    id: str
+    tenant_id: str
+    thread_id: str | None = None
+    workflow_id: str | None = None
+    span_count: int
+    duration_ms: int
+    token_input: int
+    token_output: int
+    status: str
+    events: str
+    created_at: str
+
+
+class TraceListResponse(BaseModel):
+    items: list[TraceItem]
+
+
+class TraceStatsResponse(BaseModel):
+    """GET /api/v2/traces/stats：用量统计。"""
+
+    total_traces: int
+    total_token_input: int
+    total_token_output: int
+    total_duration_ms: int
+    avg_duration_ms: int
+    error_count: int
+
+
+# ===== V2-T10：Prompt 版本管理 =====
+
+
+class PromptCreateRequest(BaseModel):
+    """POST /api/v2/prompts。
+
+    key 已存在时自动 +1 版本；is_active 默认 True（覆盖旧 active）。
+    """
+
+    key: str = Field(..., min_length=1, max_length=128)
+    content: str = Field(..., min_length=1)
+    change_note: str = ""
+    is_active: bool = True
+
+
+class PromptUpdateRequest(BaseModel):
+    content: str | None = None
+    change_note: str | None = None
+    is_active: bool | None = None
+
+
+class PromptItem(BaseModel):
+    id: str
+    tenant_id: str
+    key: str
+    version: int
+    content: str
+    change_note: str
+    is_active: bool
+    created_at: str
+    created_by: str | None = None
+
+
+class PromptListResponse(BaseModel):
+    items: list[PromptItem]
+
+
+class PromptDiffResponse(BaseModel):
+    """GET /api/v2/prompts/{key}/diff?from=1&to=2。"""
+
+    key: str
+    from_version: int
+    to_version: int
+    from_content: str
+    to_content: str
+    added_lines: list[str]
+    removed_lines: list[str]

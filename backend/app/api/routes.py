@@ -62,6 +62,11 @@ from app.api.schemas import (
     OrchestratorRunRequest,
     OrchestratorRunResponse,
     OrchestratorStepItem,
+    PromptCreateRequest,
+    PromptDiffResponse,
+    PromptItem,
+    PromptListResponse,
+    PromptUpdateRequest,
     RegisterRequest,
     RegisterResponse,
     SessionItem,
@@ -69,6 +74,17 @@ from app.api.schemas import (
     SkillCreateRequest,
     SkillItem,
     SkillListResponse,
+    TestCaseCreateRequest,
+    TestCaseItem,
+    TestCaseListResponse,
+    TestCaseUpdateRequest,
+    TestRunItem,
+    TestRunListResponse,
+    TestRunRequest,
+    TestRunResponse,
+    TraceItem,
+    TraceListResponse,
+    TraceStatsResponse,
     WorkflowCreateRequest,
     WorkflowItem,
     WorkflowListResponse,
@@ -87,7 +103,11 @@ from app.db import _build_index_config
 from app.memory import memory_namespace
 from app.models import (
     Message,
+    Prompt as PromptModel,
     Session as SessionModel,
+    TestCase as TestCaseModel,
+    TestRun as TestRunModel,
+    Trace as TraceModel,
     Workflow as WorkflowModel,
     WorkflowCheckpoint as WorkflowCheckpointModel,
     WorkflowVersion as WorkflowVersionModel,
@@ -109,8 +129,11 @@ from app.skill_loader import (
 from app.workflow import (
     CompileError,
     SubagentOrchestrator,
+    assert_case,
     compile_workflow,
+    run_batch,
     spec_from_compiled,
+    traced_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +157,7 @@ def create_app(
     backend_factory: Any = None,
     sandbox_mode: str | None = None,
     orchestrator_runner: Any = None,
+    eval_runner: Any = None,
 ) -> FastAPI:
     """构建 FastAPI 应用。
 
@@ -144,6 +168,9 @@ def create_app(
         orchestrator_runner: V2-T4 sequential 编排 runner 注入缝
             （``async (spec, task, context) -> str``）；缺省 None 用 deepagents 默认 runner。
             仅供测试；生产链路依赖 LLM。
+        eval_runner: V2-T8 评测 runner 注入缝
+            （``async (case_input, context) -> str``）；缺省 None 用 _default_eval_runner
+            （依赖真实 Agent）；测试注入跳过 LLM。
     """
     from fastapi.middleware.cors import CORSMiddleware
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -175,6 +202,7 @@ def create_app(
         app.state.registry = registry
         app.state.model_override = model_override
         app.state.orchestrator_runner = orchestrator_runner
+        app.state.eval_runner = eval_runner
         logger.info(
             "API 就绪：model=%s sandbox_mode=%s", model_override or settings.model, registry.mode
         )
@@ -957,29 +985,30 @@ def create_app(
         ctx: TenantContext = Depends(get_current_user_dep),
         db: AsyncSession = Depends(get_db),
     ) -> CheckpointItem:
-        # 校验 thread 归属（sessions 表 thread_id unique）
-        sess = (
-            await db.execute(
-                select(SessionModel).where(
-                    SessionModel.thread_id == thread_id,
-                    SessionModel.tenant_id == ctx.tenant_id,
-                )
-            )
-        ).scalar_one_or_none()
-        if sess is None:
-            raise HTTPException(status_code=404, detail="thread not found")
-        if body.workflow_id:
-            wf = (
+        # 校验 + 写入在同一个事务内完成，避免 autobegin 后再 begin 冲突
+        async with db.begin():
+            # 校验 thread 归属（sessions 表 thread_id unique）
+            sess = (
                 await db.execute(
-                    select(WorkflowModel).where(
-                        WorkflowModel.id == body.workflow_id,
-                        WorkflowModel.tenant_id == ctx.tenant_id,
+                    select(SessionModel).where(
+                        SessionModel.thread_id == thread_id,
+                        SessionModel.tenant_id == ctx.tenant_id,
                     )
                 )
             ).scalar_one_or_none()
-            if wf is None:
-                raise HTTPException(status_code=400, detail="workflow_id 无效")
-        async with db.begin():
+            if sess is None:
+                raise HTTPException(status_code=404, detail="thread not found")
+            if body.workflow_id:
+                wf = (
+                    await db.execute(
+                        select(WorkflowModel).where(
+                            WorkflowModel.id == body.workflow_id,
+                            WorkflowModel.tenant_id == ctx.tenant_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if wf is None:
+                    raise HTTPException(status_code=400, detail="workflow_id 无效")
             ckpt = WorkflowCheckpointModel(
                 tenant_id=ctx.tenant_id,
                 workflow_id=body.workflow_id,
@@ -1068,16 +1097,527 @@ def create_app(
             raise HTTPException(
                 status_code=500, detail=f"checkpoint 复制失败: {exc}"
             ) from exc
-        async with db.begin():
-            ckpt.target_thread_id = new_thread_id
-            await db.flush()
+        # 复用 SELECT 自动开启的事务写回 target_thread_id
+        ckpt.target_thread_id = new_thread_id
+        await db.flush()
+        await db.commit()
         return CheckpointRestoreResponse(
             checkpoint_id=ckpt.id,
             source_thread_id=thread_id,
             target_thread_id=new_thread_id,
         )
 
+    # ================================================================== #
+    # V2-T8：评测面板（TestCase CRUD + 批量运行）
+    # ================================================================== #
+
+    def _testcase_to_item(c: TestCaseModel) -> TestCaseItem:
+        return TestCaseItem(
+            id=c.id,
+            tenant_id=c.tenant_id,
+            workflow_id=c.workflow_id,
+            name=c.name,
+            input=c.input,
+            expected=c.expected,
+            assertion=c.assertion,
+            actual=c.actual,
+            passed=c.passed,
+            run_at=c.run_at.isoformat() if c.run_at else None,
+            created_at=c.created_at.isoformat(),
+        )
+
+    def _testrun_to_item(r: TestRunModel) -> TestRunItem:
+        total = r.total or 1
+        return TestRunItem(
+            id=r.id,
+            tenant_id=r.tenant_id,
+            workflow_id=r.workflow_id,
+            total=r.total,
+            passed=r.passed,
+            pass_rate=round(r.passed / total, 4) if total else 0.0,
+            case_results=r.case_results,
+            elapsed_ms=r.elapsed_ms,
+            created_at=r.created_at.isoformat(),
+        )
+
+    @app.get("/api/v2/tests", response_model=TestCaseListResponse)
+    async def tests_list(
+        workflow_id: str | None = None,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> TestCaseListResponse:
+        stmt = select(TestCaseModel).where(TestCaseModel.tenant_id == ctx.tenant_id)
+        if workflow_id:
+            stmt = stmt.where(
+                (TestCaseModel.workflow_id == workflow_id)
+                | (TestCaseModel.workflow_id.is_(None))
+            )
+        res = await db.execute(stmt.order_by(TestCaseModel.created_at.desc()))
+        return TestCaseListResponse(items=[_testcase_to_item(c) for c in res.scalars()])
+
+    @app.post("/api/v2/tests", response_model=TestCaseItem, status_code=201)
+    async def tests_create(
+        body: TestCaseCreateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> TestCaseItem:
+        async with db.begin():
+            if body.workflow_id:
+                wf = (
+                    await db.execute(
+                        select(WorkflowModel).where(
+                            WorkflowModel.id == body.workflow_id,
+                            WorkflowModel.tenant_id == ctx.tenant_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if wf is None:
+                    raise HTTPException(status_code=400, detail="workflow_id 无效")
+            c = TestCaseModel(
+                tenant_id=ctx.tenant_id,
+                workflow_id=body.workflow_id,
+                name=body.name,
+                input=body.input,
+                expected=body.expected,
+                assertion=body.assertion,
+            )
+            db.add(c)
+            await db.flush()
+            await db.refresh(c)
+        return _testcase_to_item(c)
+
+    @app.put("/api/v2/tests/{case_id}", response_model=TestCaseItem)
+    async def tests_update(
+        case_id: str,
+        body: TestCaseUpdateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> TestCaseItem:
+        async with db.begin():
+            c = (
+                await db.execute(
+                    select(TestCaseModel).where(
+                        TestCaseModel.id == case_id,
+                        TestCaseModel.tenant_id == ctx.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if c is None:
+                raise HTTPException(status_code=404, detail="case not found")
+            if body.name is not None:
+                c.name = body.name
+            if body.input is not None:
+                c.input = body.input
+            if body.expected is not None:
+                c.expected = body.expected
+            if body.assertion is not None:
+                c.assertion = body.assertion
+            if body.workflow_id is not None:
+                c.workflow_id = body.workflow_id
+            await db.flush()
+            await db.refresh(c)
+        return _testcase_to_item(c)
+
+    @app.delete("/api/v2/tests/{case_id}")
+    async def tests_delete(
+        case_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        async with db.begin():
+            c = (
+                await db.execute(
+                    select(TestCaseModel).where(
+                        TestCaseModel.id == case_id,
+                        TestCaseModel.tenant_id == ctx.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if c is None:
+                raise HTTPException(status_code=404, detail="case not found")
+            await db.delete(c)
+        return {"deleted": case_id}
+
+    @app.post("/api/v2/tests/run", response_model=TestRunResponse)
+    async def tests_run(
+        body: TestRunRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> TestRunResponse:
+        """批量运行 test case。注入 fake runner（app.state.eval_runner）便于测试。"""
+        stmt = select(TestCaseModel).where(TestCaseModel.tenant_id == ctx.tenant_id)
+        if body.workflow_id:
+            stmt = stmt.where(
+                (TestCaseModel.workflow_id == body.workflow_id)
+                | (TestCaseModel.workflow_id.is_(None))
+            )
+        if body.case_ids:
+            stmt = stmt.where(TestCaseModel.id.in_(body.case_ids))
+        res = await db.execute(stmt)
+        cases = res.scalars().all()
+        if not cases:
+            raise HTTPException(status_code=400, detail="无可运行的 case")
+
+        # 取 runner：默认调真实 Agent，测试缝 app.state.eval_runner
+        runner = getattr(app.state, "eval_runner", None)
+        if runner is None:
+            runner = _default_eval_runner
+
+        case_dicts = [
+            {
+                "id": c.id,
+                "name": c.name,
+                "input": c.input,
+                "expected": c.expected,
+                "assertion": c.assertion,
+            }
+            for c in cases
+        ]
+        batch = await run_batch(
+            case_dicts,
+            runner,
+            context={"tenant_id": ctx.tenant_id, "workflow_id": body.workflow_id},
+        )
+
+        import json as _json
+
+        # 回写每个 case 的实际结果 + 记录批次（复用 SELECT 自动开启的事务）
+        case_map = {c.id: c for c in cases}
+        for r in batch.results:
+            tc = case_map.get(r.case_id)
+            if tc is None:
+                continue
+            tc.actual = r.actual
+            tc.passed = r.passed
+            from datetime import datetime, timezone as _tz
+
+            tc.run_at = datetime.now(_tz.utc)
+        tr = TestRunModel(
+            tenant_id=ctx.tenant_id,
+            workflow_id=body.workflow_id,
+            total=batch.total,
+            passed=batch.passed,
+            case_results=_json.dumps(batch.to_dict()["results"], ensure_ascii=False),
+            elapsed_ms=batch.elapsed_ms,
+        )
+        db.add(tr)
+        await db.flush()
+        await db.refresh(tr)
+        await db.commit()
+        return TestRunResponse(**_testrun_to_item(tr).model_dump())
+
+    @app.get("/api/v2/tests/runs", response_model=TestRunListResponse)
+    async def test_runs_list(
+        workflow_id: str | None = None,
+        limit: int = 50,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> TestRunListResponse:
+        stmt = select(TestRunModel).where(TestRunModel.tenant_id == ctx.tenant_id)
+        if workflow_id:
+            stmt = stmt.where(TestRunModel.workflow_id == workflow_id)
+        res = await db.execute(
+            stmt.order_by(TestRunModel.created_at.desc()).limit(limit)
+        )
+        return TestRunListResponse(
+            items=[_testrun_to_item(r) for r in res.scalars()]
+        )
+
+    # ================================================================== #
+    # V2-T9：可观测性（trace 列表 + 用量统计）
+    # ================================================================== #
+
+    def _trace_to_item(t: TraceModel) -> TraceItem:
+        return TraceItem(
+            id=t.id,
+            tenant_id=t.tenant_id,
+            thread_id=t.thread_id,
+            workflow_id=t.workflow_id,
+            span_count=t.span_count,
+            duration_ms=t.duration_ms,
+            token_input=t.token_input,
+            token_output=t.token_output,
+            status=t.status,
+            events=t.events,
+            created_at=t.created_at.isoformat(),
+        )
+
+    @app.get("/api/v2/traces", response_model=TraceListResponse)
+    async def traces_list(
+        thread_id: str | None = None,
+        workflow_id: str | None = None,
+        limit: int = 50,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> TraceListResponse:
+        stmt = select(TraceModel).where(TraceModel.tenant_id == ctx.tenant_id)
+        if thread_id:
+            stmt = stmt.where(TraceModel.thread_id == thread_id)
+        if workflow_id:
+            stmt = stmt.where(TraceModel.workflow_id == workflow_id)
+        res = await db.execute(
+            stmt.order_by(TraceModel.created_at.desc()).limit(limit)
+        )
+        return TraceListResponse(items=[_trace_to_item(t) for t in res.scalars()])
+
+    @app.get("/api/v2/traces/stats", response_model=TraceStatsResponse)
+    async def traces_stats(
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> TraceStatsResponse:
+        """用量统计：总 trace 数、总 token、总耗时、平均耗时、错误数。"""
+        res = await db.execute(
+            select(TraceModel).where(TraceModel.tenant_id == ctx.tenant_id)
+        )
+        traces = res.scalars().all()
+        n = len(traces)
+        if n == 0:
+            return TraceStatsResponse(
+                total_traces=0,
+                total_token_input=0,
+                total_token_output=0,
+                total_duration_ms=0,
+                avg_duration_ms=0,
+                error_count=0,
+            )
+        total_in = sum(t.token_input for t in traces)
+        total_out = sum(t.token_output for t in traces)
+        total_dur = sum(t.duration_ms for t in traces)
+        errors = sum(1 for t in traces if t.status == "error")
+        return TraceStatsResponse(
+            total_traces=n,
+            total_token_input=total_in,
+            total_token_output=total_out,
+            total_duration_ms=total_dur,
+            avg_duration_ms=total_dur // n,
+            error_count=errors,
+        )
+
+    @app.get("/api/v2/traces/{trace_id}", response_model=TraceItem)
+    async def trace_get(
+        trace_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> TraceItem:
+        t = (
+            await db.execute(
+                select(TraceModel).where(
+                    TraceModel.id == trace_id,
+                    TraceModel.tenant_id == ctx.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if t is None:
+            raise HTTPException(status_code=404, detail="trace not found")
+        return _trace_to_item(t)
+
+    # ================================================================== #
+    # V2-T10：Prompt 版本管理（CRUD + diff + 回滚）
+    # ================================================================== #
+
+    def _prompt_to_item(p: PromptModel) -> PromptItem:
+        return PromptItem(
+            id=p.id,
+            tenant_id=p.tenant_id,
+            key=p.key,
+            version=p.version,
+            content=p.content,
+            change_note=p.change_note,
+            is_active=p.is_active,
+            created_at=p.created_at.isoformat(),
+            created_by=p.created_by,
+        )
+
+    @app.get("/api/v2/prompts", response_model=PromptListResponse)
+    async def prompts_list(
+        key: str | None = None,
+        active_only: bool = False,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> PromptListResponse:
+        stmt = select(PromptModel).where(PromptModel.tenant_id == ctx.tenant_id)
+        if key:
+            stmt = stmt.where(PromptModel.key == key)
+        if active_only:
+            stmt = stmt.where(PromptModel.is_active.is_(True))
+        res = await db.execute(stmt.order_by(PromptModel.created_at.desc()))
+        return PromptListResponse(items=[_prompt_to_item(p) for p in res.scalars()])
+
+    @app.post("/api/v2/prompts", response_model=PromptItem, status_code=201)
+    async def prompts_create(
+        body: PromptCreateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> PromptItem:
+        async with db.begin():
+            # 查同 key 的最大版本号
+            existing = (
+                await db.execute(
+                    select(PromptModel)
+                    .where(
+                        PromptModel.tenant_id == ctx.tenant_id,
+                        PromptModel.key == body.key,
+                    )
+                    .order_by(PromptModel.version.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            next_ver = (existing.version + 1) if existing else 1
+            # is_active=True 时把同 key 旧版本置为 inactive
+            if body.is_active:
+                olds = (
+                    await db.execute(
+                        select(PromptModel).where(
+                            PromptModel.tenant_id == ctx.tenant_id,
+                            PromptModel.key == body.key,
+                            PromptModel.is_active.is_(True),
+                        )
+                    )
+                ).scalars().all()
+                for o in olds:
+                    o.is_active = False
+            p = PromptModel(
+                tenant_id=ctx.tenant_id,
+                key=body.key,
+                version=next_ver,
+                content=body.content,
+                change_note=body.change_note,
+                is_active=body.is_active,
+                created_by=ctx.email,
+            )
+            db.add(p)
+            await db.flush()
+            await db.refresh(p)
+        return _prompt_to_item(p)
+
+    @app.get("/api/v2/prompts/{key}", response_model=PromptListResponse)
+    async def prompts_get_versions(
+        key: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> PromptListResponse:
+        res = await db.execute(
+            select(PromptModel)
+            .where(
+                PromptModel.tenant_id == ctx.tenant_id,
+                PromptModel.key == key,
+            )
+            .order_by(PromptModel.version.desc())
+        )
+        return PromptListResponse(items=[_prompt_to_item(p) for p in res.scalars()])
+
+    @app.post(
+        "/api/v2/prompts/{key}/activate/{version}",
+        response_model=PromptItem,
+    )
+    async def prompts_activate(
+        key: str,
+        version: int,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> PromptItem:
+        """回滚：激活指定版本的 prompt（把当前 active 置为 inactive）。"""
+        async with db.begin():
+            target = (
+                await db.execute(
+                    select(PromptModel).where(
+                        PromptModel.tenant_id == ctx.tenant_id,
+                        PromptModel.key == key,
+                        PromptModel.version == version,
+                    )
+                )
+            ).scalar_one_or_none()
+            if target is None:
+                raise HTTPException(
+                    status_code=404, detail=f"prompt {key} v{version} 不存在"
+                )
+            olds = (
+                await db.execute(
+                    select(PromptModel).where(
+                        PromptModel.tenant_id == ctx.tenant_id,
+                        PromptModel.key == key,
+                        PromptModel.is_active.is_(True),
+                    )
+                )
+            ).scalars().all()
+            for o in olds:
+                o.is_active = False
+            target.is_active = True
+            await db.flush()
+            await db.refresh(target)
+        return _prompt_to_item(target)
+
+    @app.get("/api/v2/prompts/{key}/diff", response_model=PromptDiffResponse)
+    async def prompts_diff(
+        key: str,
+        frm: int = Query(..., description="from 版本号"),
+        to: int = Query(..., description="to 版本号"),
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> PromptDiffResponse:
+        """版本 diff：行级比较 from → to。"""
+        a = (
+            await db.execute(
+                select(PromptModel).where(
+                    PromptModel.tenant_id == ctx.tenant_id,
+                    PromptModel.key == key,
+                    PromptModel.version == frm,
+                )
+            )
+        ).scalar_one_or_none()
+        b = (
+            await db.execute(
+                select(PromptModel).where(
+                    PromptModel.tenant_id == ctx.tenant_id,
+                    PromptModel.key == key,
+                    PromptModel.version == to,
+                )
+            )
+        ).scalar_one_or_none()
+        if a is None or b is None:
+            raise HTTPException(status_code=404, detail="版本不存在")
+        a_lines = a.content.splitlines()
+        b_lines = b.content.splitlines()
+        a_set = set(a_lines)
+        b_set = set(b_lines)
+        added = [ln for ln in b_lines if ln not in a_set]
+        removed = [ln for ln in a_lines if ln not in b_set]
+        return PromptDiffResponse(
+            key=key,
+            from_version=frm,
+            to_version=to,
+            from_content=a.content,
+            to_content=b.content,
+            added_lines=added,
+            removed_lines=removed,
+        )
+
     return app
+
+
+# ---------------------------------------------------------------------- #
+# V2-T8 默认 eval runner：调真实 Agent
+# ---------------------------------------------------------------------- #
+
+
+async def _default_eval_runner(case_input: str, context: dict[str, Any]) -> str:
+    """默认评测 runner：复用 build_agent 跑真实 Agent。
+
+    测试应注入 fake runner（app.state.eval_runner）跳过此路径。
+    """
+    from app.agent import build_agent  # noqa: PLC0415
+    from app.sandbox_backend import OpenSandboxBackend  # noqa: PLC0415
+
+    backend = OpenSandboxBackend.create()
+    agent = build_agent(backend=backend)
+    state = {"messages": [{"role": "user", "content": case_input}]}
+    result = await agent.ainvoke(state)
+    msgs = result.get("messages", []) if isinstance(result, dict) else []
+    for m in reversed(msgs):
+        content = getattr(m, "content", None)
+        if content and getattr(m, "type", "") == "ai":
+            return content if isinstance(content, str) else str(content)
+    return ""
 
 
 # ---------------------------------------------------------------------- #

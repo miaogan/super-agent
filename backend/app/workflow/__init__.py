@@ -37,6 +37,19 @@ from app.workflow.model_router import (
     ModelStrategy,
     default_router_from_env,
 )
+from app.workflow.evaluator import (
+    BatchResult,
+    CaseResult,
+    EvalError,
+    EvalRunner,
+    assert_case,
+    run_batch,
+)
+from app.workflow.observability import (
+    Span,
+    TraceCollector,
+    traced_call,
+)
 
 __all__ = [
     # 编译器
@@ -57,4 +70,15 @@ __all__ = [
     "ModelRouter",
     "ModelStrategy",
     "default_router_from_env",
+    # 评测
+    "BatchResult",
+    "CaseResult",
+    "EvalError",
+    "EvalRunner",
+    "assert_case",
+    "run_batch",
+    # 可观测性
+    "Span",
+    "TraceCollector",
+    "traced_call",
 ]
