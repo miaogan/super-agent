@@ -10,9 +10,10 @@
 |---|---|---|---|---|
 | **V1 MVP** | 端到端打通 | 注册→上传 SKILL.md→对话调用 Agent→SSE 看结果→查历史 | 单体 + Docker Compose | 6-8 周 |
 | **V2 产品化** | 完整可视化平台 | 画布拖拽编排→编译→部署→子代理→评测→可观测 | 模块化单体 + Redis | 8-12 周 |
-| **V3 企业化** | 微服务 + 协议演进 | 多服务集群→A2A 互通→灰度/RAG/治理→模板市场 | K8s + Nacos | 12-16 周 |
+| **V2.5 生产化** | 补齐 V2 能力缺口 | 条件分支+HIL+并行 / RAG / MCP / 配额审计 / K8s | 模块化单体 + K8s | 6-8 周 |
+| **V3 企业化** | 微服务 + 协议演进 | 多服务集群→A2A 互通→模板市场→SSO | K8s + Nacos | 10-14 周 |
 
-**总周期约 6-9 个月**，每个版本结束即可对外交付。
+**总周期约 8-12 个月**，每个版本结束即可对外交付。
 
 ---
 
@@ -120,15 +121,107 @@
 
 ---
 
+# V2.5 · 生产化补强（V2 → V3 过渡）
+
+> **定位**：不拆微服务（留 V3），补齐 V2 暴露的 5 大能力缺口，从「演示级」→「可生产级」。
+> **原则**：编排补强优先（workflow engine 硬伤），RAG + MCP + 治理三线并进，K8s 收尾。
+
+## 差距诊断（V2 验收后）
+
+| # | 差距维度 | V2 现状 | 主流平台基线 |
+|---|---|---|---|
+| 1 | 编排能力 | sequential only | 条件分支 + 并行 + HIL + 循环 |
+| 2 | 生态集成 | OpenSandbox 独家 | 100+ 工具 + MCP 协议 |
+| 3 | 企业治理 | 租户隔离 + JWT | 配额 + 审计 + SSO + 脱敏 |
+| 4 | RAG / 知识库 | 长期记忆 only | 文档解析 + 向量检索 + 引用 |
+| 5 | 部署形态 | Docker Compose | K8s + 水平扩容 + 全链路监控 |
+
+## 功能边界
+
+**做**：条件分支 + 人机协同 + 并行子代理、RAG 基础能力、MCP 协议、配额/审计/灰度、K8s Helm + OTel 全链路。
+
+**不做**（留 V3）：微服务拆分、A2A/ACP 协议、adversarial 子代理、模板市场、SSO。
+
+## 任务分解
+
+| 任务 | 目标 | 周期 | 依赖 | 优先级 |
+|---|---|---|---|---|
+| **V2.5-T1** 条件分支节点 | `if`/`switch` 节点 + 表达式求值器 + 编译器扩展 + 前端节点面板 | 1 周 | V2-T2 | 高 |
+| **V2.5-T2** 人机协同（HIL） | `interrupt()` + 恢复 + 审批节点 + 前端审批 UI（挂起→人工确认→续跑） | 1 周 | V2-T5 | 高 |
+| **V2.5-T3** 并行子代理 | `fan-out`/`fan-in` + 结果合并策略（first/all/merge） | 5 天 | V2-T4 | 中 |
+| **V2.5-T4** RAG 基础 | pgvector 扩展 + 文档上传/解析/分块 + 向量索引 + 检索工具 | 1 周 | V2-T11 | 高 |
+| **V2.5-T5** 混合检索 | 向量 + BM25 关键词 + cross-encoder 重排 + 引用溯源 | 5 天 | T4 | 高 |
+| **V2.5-T6** MCP 协议支持 | MCP client + 工具自动发现 + 安全沙箱（限定工具能力域） | 1 周 | — | 高 |
+| **V2.5-T7** 工具市场骨架 | 插件 manifest + 注册中心 + 一键安装 + 权限校验 | 5 天 | T6 | 中 |
+| **V2.5-T8** 配额与限流 | QPS / Token / 调用次数 + 租户级配额 + Redis 令牌桶 | 5 天 | V2 多租户 | 高 |
+| **V2.5-T9** 审计日志 | 操作审计 + 数据访问审计 + 审计查询 API + 保留策略 | 5 天 | T8 | 中 |
+| **V2.5-T10** API Key 轮转 + 灰度发布 | Key 生命周期（创建/吊销/轮转） + Workflow 版本灰度（流量切分） | 5 天 | T8 | 中 |
+| **V2.5-T11** K8s Helm chart + 水平扩容 | Helm chart + HPA + 配置外部化（ConfigMap/Secret） + PV 持久化 | 1 周 | V2 Docker | 高 |
+| **V2.5-T12** OTel 全链路可观测 + 告警 | OTLP exporter + Prometheus + Grafana dashboard + 告警规则 | 5 天 | T11 | 中 |
+| **V2.5-T13** E2E 联调 | 条件分支→HIL→RAG→MCP→配额→审计全链路 | 5 天 | 全部 | 高 |
+
+## V2.5 验收
+
+- ✅ 画布拖出 `start → if(条件) → agent_A / agent_B → merge → end`，按条件分流
+- ✅ 审批节点：Agent 产出方案 → 挂起 → 人工审批 → 通过则续跑，拒绝则走 fallback 分支
+- ✅ 并行子代理：3 个 agent 并行执行，fan-in 取 first/all/merge
+- ✅ 上传 PDF/Word/Markdown → 自动分块 → 向量索引 → 对话引用原文片段
+- ✅ 混合检索：向量召回 + BM25 关键词 + cross-encoder 重排，返回带引用的回答
+- ✅ 接入 MCP server，自动发现工具并注册为 Agent 可用工具
+- ✅ 工具市场：安装插件 → manifest 校验 → 权限确认 → 工具可用
+- ✅ 租户配额：超过 QPS/Token 上限返回 429，审计日志记录全部关键操作
+- ✅ API Key 轮转：旧 Key 吊销后调用失效，新 Key 立即生效
+- ✅ Workflow 灰度：v2 上线 10% 流量，可一键回滚到 v1
+- ✅ `helm install` 一键起集群，HPA 自动扩容 backend 副本
+- ✅ Grafana 看板：trace + token 用量 + 错误率 + 告警通知
+
+## V2.5 关键设计决策
+
+- **条件分支用表达式求值器**（如 `eval_ex`），不引入完整 DSL，保持编译器简单
+- **HIL 复用 LangGraph `interrupt()`**，不自研挂起/恢复机制
+- **RAG 用 pgvector**（PostgreSQL 扩展），不引入独立向量库，保持单库
+- **MCP 优先于 A2A**：MCP 已有参考实现，A2A spec 仍在演进（留 V3）
+- **配额用 Redis 令牌桶**，不用数据库计数（性能 + 实时性）
+- **K8s 优先于微服务拆分**：先解决部署可生产性，再解决架构可扩展性
+
+## V2.5 任务依赖图
+
+```
+                    ┌── T1 条件分支 ──┐
+                    │                 ├── T3 并行 ──┐
+V2-T2 编译器 ───────┤                 │             │
+                    └── T2 HIL ───────┘             │
+                                                     │
+V2-T11 记忆 ──────── T4 RAG 基础 ─── T5 混合检索 ────┤
+                                                     ├── T13 E2E 联调
+                     T6 MCP ────────── T7 工具市场 ──┤
+                                                     │
+V2 多租户 ────────── T8 配额限流 ──── T9 审计 ───────┤
+                          │                          │
+                          └── T10 Key 轮转+灰度 ─────┤
+                                                     │
+V2 Docker ─────────── T11 K8s Helm ──── T12 OTel ───┘
+```
+
+## V2.5 测试目标
+
+- 单元测试：表达式求值 / interrupt 状态机 / fan-in 合并 / RAG 分块 / MCP client
+- 集成测试：条件分支 E2E / HIL 审批流 / RAG 全链路 / 配额限流 / 灰度切流
+- 测试结果目标：200+ passed（V2 基线 170 + V2.5 新增 30+）
+
+---
+
 # V3 · 企业化（微服务 + 协议演进）
 
 **原则**：单租户→多租户集群，单体→微服务，闭环→开放协议互通。
 
 ## 功能边界
 
-**做**：数据库垂直拆分、Nacos 服务注册、服务抽取（agent-runtime / sandbox / workflow / api 四服务）、A2A Registry + Gateway、灰度发布、Agentic RAG、安全治理、模板市场。
+**做**：数据库垂直拆分、Nacos 服务注册、服务抽取（agent-runtime / sandbox / workflow / api 四服务）、A2A Registry + Gateway、模板市场、adversarial 子代理、SSO。
 
-**可选做**：ACP 协议（spec 成熟后再说）、adversarial 子代理、parallel 子代理。
+**可选做**：ACP 协议（spec 成熟后再说）。
+
+> 注：V2.5 已覆盖灰度发布、RAG 基础、安全治理、K8s 部署；V3 聚焦微服务化 + A2A 协议 + 模板市场。
 
 ## 任务分解
 
@@ -139,21 +232,21 @@
 | **V3-T3** 服务抽取 | 拆 agent-runtime / sandbox-manager / workflow-service / api-gateway | 3 周 | 高（依赖梳理） |
 | **V3-T4** A2A Registry | Agent 卡片注册 + 发现 + 能力声明 | 2 周 | 高（协议新） |
 | **V3-T5** A2A Gateway | 跨 Agent 任务派发 + 状态同步 | 2 周 | 高 |
-| **V3-T6** 灰度发布 | Workflow/Agent 版本灰度 + 流量切分 | 1 周 | 中 |
-| **V3-T7** Agentic RAG | 向量库 + 检索工具 + 注入策略 | 2 周 | 中 |
-| **V3-T8** 安全治理 | API Key 轮转 + 配额 + 审计 + 数据脱敏 | 2 周 | 中 |
-| **V3-T9** 模板市场 | Workflow/Skill/Prompt 上架 + 评分 + 一键安装 | 2 周 | 中 |
-| **V3-T10** adversarial 子代理 | 引入 judge agent + 投票合并 | 1 周 | 中 |
-| **V3-T11** ACP 协议（可选） | Agent 通信协议适配层 | 2 周 | 极高（spec 未稳定） |
-| **V3-T12** K8s 部署 + 文档 | Helm chart + 运维手册 | 1 周 | 低 |
+| **V3-T6** 模板市场 | Workflow/Skill/Prompt 上架 + 评分 + 一键安装 | 2 周 | 中 |
+| **V3-T7** adversarial 子代理 | 引入 judge agent + 投票合并 | 1 周 | 中 |
+| **V3-T8** SSO + 数据脱敏 | OAuth2/SAML SSO + PII 检测/脱敏 | 2 周 | 中 |
+| **V3-T9** ACP 协议（可选） | Agent 通信协议适配层 | 2 周 | 极高（spec 未稳定） |
+| **V3-T10** 多集群运维手册 | 多集群部署 + 跨集群灰度 + 运维 runbook | 1 周 | 低 |
+
+> 注：V2.5 已覆盖单集群 K8s、灰度发布、RAG、安全治理基础；V3 聚焦微服务化 + A2A + 模板市场 + SSO。
 
 ## V3 验收
 
 - 4 个微服务独立部署，Nacos 注册可见
 - A2A Registry 注册 3 个外部 Agent，主 Agent 可派发任务并回收结果
-- Workflow 灰度：v2 上线 10% 流量，可一键回滚
 - 模板市场可上架 Skill，其他租户可一键安装
-- K8s `helm install` 一键起集群
+- SSO 登录支持 OAuth2，PII 字段自动脱敏
+- 多集群灰度：v2 在 cluster-A 上线，可一键切流到 cluster-B
 
 ## V3 风险与对策
 
