@@ -10,6 +10,13 @@
 | SSE 对话服务 | FastAPI + `StreamingResponse` 流式推送 token/工具/子代理事件 | ✅ 已测 |
 | 子代理 | `coder` / `data-analyst` / `researcher` / `reviewer`，`task` 工具派发 | ✅ 已测 |
 | 沙箱生命周期 | `SandboxRegistry`：shared/thread 隔离 + 空闲 TTL 回收 | ✅ 已测 |
+| Workflow 画布编排 | Vue Flow 画布 + 编译器（拓扑/环检测）+ sequential 子代理编排 | ✅ 已测（V2） |
+| 检查点回退 | `AsyncPostgresSaver` create/list/restore API | ✅ 已测（V2） |
+| 模型路由 | auto/cost/quality 四策略 + 任务类型映射 | ✅ 已测（V2） |
+| 评测面板 | TestCase + golden case 批量运行 + contains/regex/similarity 三断言 | ✅ 已测（V2） |
+| 可观测性 | TraceCollector 采集 span + token 用量 + 耗时，落 traces 表 | ✅ 已测（V2） |
+| Prompt 版本管理 | 按租户隔离的版本自增 + active 切换 + 版本 diff | ✅ 已测（V2） |
+| 多租户隔离 | 全表 `tenant_id` where 过滤 + JWT 鉴权 | ✅ 已测（V2） |
 
 ## 架构
 
@@ -163,6 +170,36 @@ EMBEDDING_API_KEY=lm-studio
 | `POST` | `/api/memories` | 写入一条长期记忆 |
 | `DELETE` | `/api/memories/{key}` | 删除一条记忆 |
 
+#### V2 API 端点
+
+V2 在 V1 之上补齐了画布编排、检查点、评测、可观测、Prompt 版本管理等能力，全部按 `tenant_id` 隔离 + JWT 鉴权：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/v1/tenants/register` | 注册租户 + 用户（返回 tenant_id + access_token） |
+| `POST` | `/api/v1/tenants/login` | 登录（返回 access_token） |
+| `GET` | `/api/v1/sessions` | 当前租户的会话列表 |
+| `GET` | `/api/v1/sessions/{id}/messages` | 会话历史消息 |
+| `GET/POST/PUT/DELETE` | `/api/v2/workflows` | Workflow CRUD（含画布定义 JSONB） |
+| `POST` | `/api/v2/workflows/compile` | 编译预览（不落库） |
+| `GET` | `/api/v2/workflows/{id}/config` | 读 active 版本的 compiled config |
+| `GET` | `/api/v2/workflows/{id}/versions` | 版本列表 |
+| `POST` | `/api/v2/workflows/{id}/activate/{ver}` | 激活旧版本 |
+| `POST` | `/api/v2/workflows/{id}/orchestrate` | sequential 子代理编排（串行链） |
+| `POST` | `/api/v2/threads/{tid}/checkpoints` | 创建检查点 |
+| `GET` | `/api/v2/threads/{tid}/checkpoints` | 检查点列表 |
+| `POST` | `/api/v2/threads/{tid}/checkpoints/{cid}/restore` | 回退到检查点（复制到新 thread） |
+| `GET/POST/PUT/DELETE` | `/api/v2/tests` | TestCase CRUD |
+| `POST` | `/api/v2/tests/run` | 批量运行评测（支持 fake runner 注入） |
+| `GET` | `/api/v2/tests/runs` | 评测运行历史 |
+| `GET` | `/api/v2/traces` | Trace 列表（按 thread/workflow 过滤） |
+| `GET` | `/api/v2/traces/stats` | 用量统计（总 token / 耗时 / 错误数） |
+| `GET` | `/api/v2/traces/{id}` | 单个 trace 详情 |
+| `GET/POST` | `/api/v2/prompts` | Prompt 版本列表 / 创建新版本（自动 +1） |
+| `GET` | `/api/v2/prompts/{key}` | 某 key 的全部版本 |
+| `POST` | `/api/v2/prompts/{key}/activate/{ver}` | 回滚到指定版本 |
+| `GET` | `/api/v2/prompts/{key}/diff` | 版本 diff（`frm` / `to` 查询参数） |
+
 `POST /api/chat` 请求体：
 
 ```jsonc
@@ -236,48 +273,90 @@ deepagents 的 `BaseSandbox` 只要求实现 4 个原语，其余文件工具全
 
 ```
 super_agent/
-├── main.py                    # CLI 入口（REPL，流式输出）
-├── server.py                  # FastAPI + SSE 服务入口
-├── static/index.html          # SSE 聊天地emo页
-├── app/
-│   ├── __init__.py            # Windows 事件循环策略修正
-│   ├── config.py              # 环境变量配置（.env）
-│   ├── db.py                  # PostgreSQL 持久化（checkpointer + store）
-│   ├── memory.py              # 长期记忆：注入 middleware + 记忆工具
-│   ├── sandbox_backend.py     # OpenSandbox → deepagents 沙箱后端适配器
-│   ├── agent.py               # deep agent 组装（模型/工具/子代理/中间件）
-│   └── api/
-│       ├── routes.py          # FastAPI 路由 + SSE 事件翻译
-│       ├── schemas.py         # API 请求/响应模型
-│       ├── sandbox_registry.py# 沙箱生命周期（shared/thread + TTL 回收）
-│       └── __init__.py
-├── tests/
-│   ├── test_imports.py        # 导入冒烟测试
-│   ├── test_sandbox_backend.py# 沙箱后端单元测试（FakeSandbox）
-│   ├── test_memory_flow.py    # 记忆链路集成测试（真实 PostgreSQL）
-│   ├── test_real_sandbox.py   # 真实 OpenSandbox 端到端测试
-│   └── test_api.py            # FastAPI + SSE 集成测试（fake 模型 + 真实 PG）
-├── docker-compose.yml         # PostgreSQL（OpenSandbox server 可选）
-├── sandbox.toml               # OpenSandbox 服务端配置（Docker runtime）
-├── pyproject.toml
-└── .env.example
+├── backend/                    # FastAPI 后端
+│   ├── main.py / server.py      # CLI 入口 / FastAPI + SSE 服务入口
+│   ├── app/
+│   │   ├── config.py            # 环境变量配置（.env）
+│   │   ├── db.py                # PostgreSQL 持久化（checkpointer + store）
+│   │   ├── memory.py            # 长期记忆：注入 middleware + 记忆工具
+│   │   ├── models.py            # SQLAlchemy ORM（多租户 + V2 模型）
+│   │   ├── auth.py              # JWT 鉴权 + 租户上下文
+│   │   ├── sandbox_backend.py   # OpenSandbox → deepagents 沙箱后端适配器
+│   │   ├── agent.py             # deep agent 组装（模型/工具/子代理/中间件）
+│   │   ├── skill_loader.py      # SKILL.md 目录扫描 + frontmatter 解析
+│   │   ├── opensandbox_manager.py
+│   │   ├── lmstudio_embeddings.py
+│   │   ├── api/
+│   │   │   ├── routes.py        # FastAPI 路由 + SSE 事件翻译（V1 + V2 全部端点）
+│   │   │   ├── schemas.py       # API 请求/响应模型
+│   │   │   ├── sandbox_registry.py # 沙箱生命周期（shared/thread + TTL 回收）
+│   │   │   └── __init__.py
+│   │   └── workflow/            # V2 工作流引擎
+│   │       ├── compiler.py      # 编译器：拓扑排序 + 环检测 + 节点合并
+│   │       ├── orchestrator.py  # SubagentOrchestrator：sequential 串行编排
+│   │       ├── evaluator.py    # 评测：assert_case + run_batch + 通过率
+│   │       ├── observability.py # TraceCollector：span + token 用量 + 落库
+│   │       ├── model_router.py  # 模型路由：auto/cost/quality 四策略
+│   │       └── __init__.py
+│   ├── tests/
+│   │   ├── test_imports.py      # 导入冒烟测试
+│   │   ├── test_sandbox_backend.py # 沙箱后端单元测试（FakeSandbox）
+│   │   ├── test_memory_flow.py  # 记忆链路集成测试（真实 PostgreSQL）
+│   │   ├── test_real_sandbox.py # 真实 OpenSandbox 端到端测试
+│   │   ├── test_api.py          # FastAPI + SSE 集成测试（fake 模型 + 真实 PG）
+│   │   ├── test_v1_*.py          # V1 单元测试（auth/models/skill_loader/api）
+│   │   ├── test_v2_workflow.py  # V2 编译器 + 编排 + 模型单元测试（SQLite，无 PG）
+│   │   ├── test_v2_eval_trace_prompt.py # V2 评测/Trace/Prompt 单元测试（SQLite，无 PG）
+│   │   ├── test_v2_memory.py    # V2 长期记忆单元测试（FakeStore，无 PG）
+│   │   ├── test_v2_sandbox_registry.py # V2 沙箱注册表单元测试
+│   │   ├── test_v2_api.py       # V2 Workflow CRUD + 编排 + 多租户集成（真实 PG）
+│   │   ├── test_v2_e2e.py        # V2 全链路 E2E（画布→编译→部署→子代理→检查点→评测）
+│   │   └── conftest.py          # 自动 skip：缺 PG/Agent 栈时跳过集成测试
+│   ├── docker-compose.yml       # PostgreSQL（OpenSandbox server 可选）
+│   ├── sandbox.toml             # OpenSandbox 服务端配置（Docker runtime）
+│   ├── pyproject.toml
+│   └── .env.example
+├── frontend/                    # Vue3 + TS + Vite 前端
+│   ├── src/
+│   │   ├── App.vue / main.ts
+│   │   └── components/          # Sidebar / WorkflowCanvas（Vue Flow）
+│   ├── nginx.conf              # 构建后由 nginx 托管 + 反代 /api
+│   └── Dockerfile
+└── ROADMAP.md                  # 三阶段执行计划（V1 ✅ / V2 ✅ / V3 待启动）
 ```
 
 ## 运行测试
 
 ```bash
-.venv\Scripts\python -m tests.test_imports          # 无外部依赖
-.venv\Scripts\python -m tests.test_sandbox_backend  # 无外部依赖
-.venv\Scripts\python -m tests.test_memory_flow      # 需 PostgreSQL
-.venv\Scripts\python -m tests.test_api              # 需 PostgreSQL
-.venv\Scripts\python -m tests.test_real_sandbox     # 需 opensandbox-server + Docker
+cd backend
+
+# 单元测试（无外部依赖，SQLite / FakeStore / FakeSandbox）
+python -m pytest tests/test_imports.py tests/test_sandbox_backend.py \
+  tests/test_v2_workflow.py tests/test_v2_eval_trace_prompt.py \
+  tests/test_v2_memory.py tests/test_v2_sandbox_registry.py -q
+
+# 集成测试（需 PostgreSQL + Agent 栈）
+DATABASE_URL=postgresql://agent:agent_pass@localhost:5432/agent_memory \
+  python -m pytest tests/test_memory_flow.py tests/test_api.py \
+  tests/test_v2_api.py tests/test_v2_e2e.py -q
+
+# 真实 OpenSandbox 端到端（需 opensandbox-server + Docker）
+python -m pytest tests/test_real_sandbox.py -q
+
+# 全部（conftest 自动 skip 缺依赖的集成测试）
+python -m pytest tests/ -q
 ```
 
-测试覆盖：BaseSandbox 抽象契约（部分成功、父目录创建、timeout 透传）、
-同步/异步桥接、多轮对话历史保持、长期记忆写入/注入/跨 thread 共享、
-真实沙箱 execute 与派生文件工具（write/read/edit/ls/glob/grep），以及
-FastAPI/SSE：健康检查、子代理清单、SSE 事件流（token/tool/memory/subagent）、
-会话历史恢复、404 处理、长期记忆 CRUD。
+测试覆盖：
+- **V1**：BaseSandbox 抽象契约（部分成功、父目录创建、timeout 透传）、
+  同步/异步桥接、多轮对话历史保持、长期记忆写入/注入/跨 thread 共享、
+  真实沙箱 execute 与派生文件工具、FastAPI/SSE 事件流、多租户 JWT 鉴权。
+- **V2**：编译器（拓扑/环检测/节点合并）、sequential 子代理编排（串行链）、
+  评测断言（contains/regex/similarity）+ 批量运行 + 通过率、
+  TraceCollector（span/token/耗时）、Prompt 版本管理（自增/active/diff/回滚）、
+  沙箱注册表（shared/thread + TTL 回收）、长期记忆 middleware（同步/异步注入）、
+  全链路 E2E（画布→编译→部署→子代理→检查点→评测→可观测→Prompt→多租户隔离）。
+- **测试结果**：170 passed（PG 在线）/ 161 passed + 9 skipped（无 PG 时自动跳过集成测试）。
 
 ## 配置参考
 
