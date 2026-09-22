@@ -10,4 +10,19 @@ dependencies = [
     "langchain-openai>=1.6",
     "psycopg[binary,pool]>=3.2",
     "python-dotenv>=1.0",
+    # V1：多租户数据层（SQLAlchemy 2.0 async，复用 psycopg）
+    "sqlalchemy[asyncio]>=2.0",
+    # V1：租户认证（JWT + bcrypt 密码哈希，直接调用 bcrypt 避开 passlib 兼容问题）
+    "python-jose[cryptography]>=3.3",
+    "bcrypt>=4.0",
+    # V1：FastAPI 已是 deepagents 间接依赖，显式锁定版本
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
 ]

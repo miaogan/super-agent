@@ -5,3 +5,7 @@ __pycache__/
 sandbox.toml
 .opensandbox/
 *.log
+# Trae IDE 自动生成的 HTML 分享包
+.trae-html-share-packages/
+# V1 Skill 文件目录（运行时生成，不入库）
+skills/

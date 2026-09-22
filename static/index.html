@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Deep Agent · SSE Chat</title>
+<title>AgentForge · SSE Chat</title>
 <style>
   :root {
     --bg: #0f1117; --panel: #171a23; --border: #2a2f3d;
@@ -37,40 +37,97 @@
   .event.subagent b { color: var(--warn); }
   .event.memory b { color: var(--ok); }
   form { display: flex; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); background: var(--panel); }
-  input {
-    flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
-    border-radius: 10px; padding: 12px 14px; font-size: 14px; outline: none;
+  input, textarea {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 10px; padding: 12px 14px; font-size: 14px; outline: none; font-family: inherit;
   }
-  input:focus { border-color: var(--accent); }
+  input:focus, textarea:focus { border-color: var(--accent); }
   button {
     background: var(--accent); color: #fff; border: none; border-radius: 10px;
     padding: 12px 20px; font-size: 14px; cursor: pointer;
   }
   button:hover { filter: brightness(1.1); }
   button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: var(--border); }
   .card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
   .card h3 { font-size: 13px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
   .agent-item { font-size: 13px; margin-bottom: 6px; }
   .agent-item .name { color: var(--warn); font-weight: 600; }
   .agent-item .desc { color: var(--muted); font-size: 12px; }
-  .mem-item { font-size: 12px; color: var(--text); padding: 6px 8px; background: var(--panel); border-radius: 6px; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 6px; }
-  .mem-item .del { color: var(--muted); cursor: pointer; } .mem-item .del:hover { color: #ff6b6b; }
+  .mem-item, .skill-item { font-size: 12px; color: var(--text); padding: 6px 8px; background: var(--panel); border-radius: 6px; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 6px; }
+  .mem-item .del, .skill-item .del { color: var(--muted); cursor: pointer; } .mem-item .del:hover, .skill-item .del:hover { color: #ff6b6b; }
+  .skill-item .badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--accent); color: #fff; }
+  .skill-item .badge.tenant { background: var(--warn); }
   .row { display: flex; gap: 8px; }
   .row button { padding: 8px 10px; font-size: 12px; }
   #thread-info { font-size: 12px; color: var(--muted); }
   .hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+  /* 登录遮罩 */
+  #auth-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #auth-overlay.hidden { display: none; }
+  .auth-card { width: 360px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 28px; }
+  .auth-card h2 { font-size: 18px; margin-bottom: 4px; }
+  .auth-card .sub { font-size: 12px; color: var(--muted); margin-bottom: 18px; }
+  .auth-card .tab { display: flex; gap: 8px; margin-bottom: 16px; }
+  .auth-card .tab button { flex: 1; background: var(--border); padding: 8px; font-size: 13px; }
+  .auth-card .tab button.active { background: var(--accent); }
+  .auth-card form { display: flex; flex-direction: column; gap: 10px; background: transparent; border: 0; padding: 0; }
+  .auth-card input { background: var(--bg); }
+  .auth-card button[type=submit] { margin-top: 4px; }
+  .auth-card .err { color: #ff6b6b; font-size: 12px; min-height: 16px; }
+  .topbar { padding: 8px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); background: var(--panel); }
+  .topbar .me { color: var(--text); }
+  textarea { width: 100%; resize: vertical; min-height: 60px; }
 </style>
 </head>
 <body>
+
+<!-- 登录遮罩 -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <h2>AgentForge</h2>
+    <div class="sub">多租户 · SSE · OpenSandbox</div>
+    <div class="tab">
+      <button id="tab-login" class="active" onclick="switchTab('login')">登录</button>
+      <button id="tab-register" onclick="switchTab('register')">注册租户</button>
+    </div>
+    <form id="auth-form">
+      <input id="f-name" placeholder="租户名（注册时填）" style="display:none">
+      <input id="f-email" type="email" placeholder="邮箱" autocomplete="email">
+      <input id="f-password" type="password" placeholder="密码（至少 8 位）" autocomplete="current-password">
+      <div class="err" id="auth-err"></div>
+      <button type="submit" id="auth-submit">登录</button>
+    </form>
+    <div class="hint" id="api-key-hint" style="display:none;margin-top:12px">
+      注册成功！请妥善保管你的 API Key（仅显示一次）：<br>
+      <code id="api-key-code" style="color:var(--ok);word-break:break-all"></code>
+    </div>
+  </div>
+</div>
+
 <aside>
   <div>
-    <h1>Deep Agent</h1>
+    <h1>AgentForge</h1>
     <div class="sub">deepagents + OpenSandbox + PostgreSQL</div>
     <div id="thread-info">thread: —</div>
   </div>
   <div class="card">
     <h3>子代理</h3>
     <div id="agent-list">加载中…</div>
+  </div>
+  <div class="card">
+    <h3>Skills</h3>
+    <div id="skill-list">—</div>
+    <details style="margin-top:8px">
+      <summary style="font-size:12px;color:var(--muted);cursor:pointer">上传 Skill</summary>
+      <textarea id="skill-content" placeholder="Skill 内容（Markdown）" style="margin-top:6px"></textarea>
+      <input id="skill-name" placeholder="skill 名称（如 write-pyfile）" style="margin-top:6px">
+      <input id="skill-desc" placeholder="一句话描述" style="margin-top:6px">
+      <button id="skill-add" style="margin-top:6px;padding:6px 10px;font-size:12px;width:100%">上传</button>
+    </details>
   </div>
   <div class="card">
     <h3>长期记忆</h3>
@@ -80,25 +137,123 @@
       <button id="mem-add" style="padding:6px 10px;font-size:12px">+</button>
     </div>
   </div>
+  <div class="card">
+    <h3>会话历史</h3>
+    <div id="session-list">—</div>
+  </div>
   <div class="row">
     <button id="new-thread" style="flex:1">新建会话</button>
-    <button id="destroy-sandbox" style="flex:1;background:var(--border)">销毁沙箱</button>
+    <button id="destroy-sandbox" class="ghost" style="flex:1">销毁沙箱</button>
   </div>
-  <div class="hint">提示：试试「用 coder 子代理写个快排并验证」或「记住我喜欢简洁回答」</div>
+  <div class="hint">提示：先在「Skills」上传能力，再让 Agent 使用它</div>
 </aside>
 
 <section>
+  <div class="topbar">
+    <span id="user-info" class="me">未登录</span>
+    <button id="logout" class="ghost" style="padding:4px 10px;font-size:11px">退出</button>
+  </div>
   <div id="messages"></div>
   <form id="chat-form">
-    <input id="chat-input" placeholder="输入消息，Enter 发送…" autocomplete="off" autofocus>
+    <input id="chat-input" placeholder="输入消息，Enter 发送…" autocomplete="off">
     <button id="send" type="submit">发送</button>
   </form>
 </section>
 
 <script>
-const state = { threadId: null, streaming: false };
+const state = {
+  threadId: null, streaming: false,
+  token: localStorage.getItem('access_token') || null,
+  tenantId: localStorage.getItem('tenant_id') || null,
+  userId: localStorage.getItem('user_id') || null,
+  email: localStorage.getItem('email') || null,
+  authMode: 'login',
+};
 const $ = id => document.getElementById(id);
 
+// ===== 鉴权 =====
+function authHeaders(extra = {}) {
+  const h = { ...extra };
+  if (state.token) h['Authorization'] = 'Bearer ' + state.token;
+  return h;
+}
+function saveAuth(d) {
+  state.token = d.access_token;
+  state.tenantId = d.tenant_id;
+  state.userId = d.user_id;
+  state.email = d.email;
+  localStorage.setItem('access_token', d.access_token);
+  localStorage.setItem('tenant_id', d.tenant_id);
+  localStorage.setItem('user_id', d.user_id);
+  localStorage.setItem('email', d.email);
+  refreshUserInfo();
+  hideAuth();
+  bootstrap();
+}
+function clearAuth() {
+  state.token = null;
+  localStorage.removeItem('access_token');
+  localStorage.removeItem('tenant_id');
+  localStorage.removeItem('user_id');
+  localStorage.removeItem('email');
+  showAuth();
+}
+function refreshUserInfo() {
+  $('user-info').textContent = state.email || '未登录';
+}
+function showAuth() { $('auth-overlay').classList.remove('hidden'); }
+function hideAuth() { $('auth-overlay').classList.add('hidden'); }
+
+function switchTab(mode) {
+  state.authMode = mode;
+  $('tab-login').classList.toggle('active', mode === 'login');
+  $('tab-register').classList.toggle('active', mode === 'register');
+  $('auth-submit').textContent = mode === 'login' ? '登录' : '注册';
+  $('f-name').style.display = mode === 'register' ? 'block' : 'none';
+  $('api-key-hint').style.display = 'none';
+  $('auth-err').textContent = '';
+}
+
+$('auth-form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('auth-err').textContent = '';
+  const email = $('f-email').value.trim();
+  const password = $('f-password').value;
+  if (!email || !password) { $('auth-err').textContent = '邮箱和密码必填'; return; }
+  const body = { email, password };
+  const url = state.authMode === 'login' ? '/api/v1/tenants/login' : '/api/v1/tenants/register';
+  if (state.authMode === 'register') {
+    const name = $('f-name').value.trim();
+    if (!name) { $('auth-err').textContent = '租户名必填'; return; }
+    body.name = name;
+  }
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) { $('auth-err').textContent = (d.detail || JSON.stringify(d)); return; }
+    if (state.authMode === 'register') {
+      // 注册成功后展示 api_key，自动切到登录态并填充邮箱
+      $('api-key-code').textContent = d.api_key;
+      $('api-key-hint').style.display = 'block';
+      $('auth-err').textContent = '';
+      switchTab('login');
+      $('f-password').value = '';
+      return;
+    }
+    saveAuth(d);
+  } catch (err) {
+    $('auth-err').textContent = String(err);
+  }
+};
+
+$('logout').onclick = () => { clearAuth(); };
+
+// ===== UI helpers =====
+const esc = s => (s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function addMsg(role, text, streaming=false) {
   const div = document.createElement('div');
   div.className = `msg ${role}${streaming ? ' streaming' : ''}`;
@@ -115,8 +270,8 @@ function addEvent(type, html) {
   $('messages').scrollTop = $('messages').scrollHeight;
   return div;
 }
-const esc = s => (s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+// ===== 数据加载 =====
 async function loadAgents() {
   const r = await fetch('/api/agents');
   const d = await r.json();
@@ -124,17 +279,70 @@ async function loadAgents() {
     `<div class="agent-item"><span class="name">${esc(s.name)}</span> · ${esc(s.description)}</div>`
   ).join('');
 }
-
 async function loadMemories() {
-  const r = await fetch('/api/memories');
+  const r = await fetch('/api/memories', { headers: authHeaders() });
+  if (r.status === 401) { clearAuth(); return; }
   const d = await r.json();
   $('memory-list').innerHTML = d.items.length
     ? d.items.map(m => `<div class="mem-item"><span>${esc(m.text)}</span><span class="del" data-key="${esc(m.key)}">✕</span></div>`).join('')
     : '<span style="color:var(--muted);font-size:12px">暂无记忆</span>';
   document.querySelectorAll('.mem-item .del').forEach(el =>
-    el.onclick = async () => { await fetch('/api/memories/' + el.dataset.key, {method:'DELETE'}); loadMemories(); });
+    el.onclick = async () => { await fetch('/api/memories/' + el.dataset.key, { method: 'DELETE', headers: authHeaders() }); loadMemories(); });
+}
+async function loadSkills() {
+  const r = await fetch('/api/v1/skills', { headers: authHeaders() });
+  if (r.status === 401) { clearAuth(); return; }
+  const d = await r.json();
+  $('skill-list').innerHTML = d.items.length
+    ? d.items.map(s => `<div class="skill-item"><span><span class="badge ${s.is_global ? '' : 'tenant'}">${s.is_global ? 'global' : '租户'}</span> ${esc(s.name)} <span style="color:var(--muted)">· ${esc(s.description)}</span></span>${s.is_global ? '' : `<span class="del" data-name="${esc(s.name)}">✕</span>`}</div>`).join('')
+    : '<span style="color:var(--muted);font-size:12px">暂无 Skill</span>';
+  document.querySelectorAll('.skill-item .del').forEach(el =>
+    el.onclick = async () => { await fetch('/api/v1/skills/' + encodeURIComponent(el.dataset.name), { method: 'DELETE', headers: authHeaders() }); loadSkills(); });
+}
+async function loadSessions() {
+  const r = await fetch('/api/v1/sessions', { headers: authHeaders() });
+  if (r.status === 401) { clearAuth(); return; }
+  const d = await r.json();
+  $('session-list').innerHTML = d.items.length
+    ? d.items.map(s => `<div class="mem-item" style="cursor:pointer" data-thread="${esc(s.thread_id)}"><span>${esc(s.title || s.thread_id)}<br><span style="color:var(--muted);font-size:10px">${new Date(s.last_active_at).toLocaleString()}</span></span></div>`).join('')
+    : '<span style="color:var(--muted);font-size:12px">暂无会话</span>';
+  document.querySelectorAll('#session-list .mem-item').forEach(el =>
+    el.onclick = async () => {
+      state.threadId = el.dataset.thread;
+      $('thread-info').textContent = 'thread: ' + state.threadId;
+      await loadSessionMessages();
+    });
+}
+async function loadSessionMessages() {
+  if (!state.threadId) return;
+  $('messages').innerHTML = '';
+  // 先从 langgraph checkpoint 恢复（沿用 /api/threads/{id}/history）
+  try {
+    const r = await fetch('/api/threads/' + state.threadId + '/history', { headers: authHeaders() });
+    if (r.ok) {
+      const d = await r.json();
+      d.messages.forEach(m => addMsg(m.role === 'human' ? 'user' : 'ai', m.content));
+    }
+  } catch (e) { /* 忽略，对话历史可从 session messages 补 */ }
 }
 
+// ===== Skill 上传 =====
+$('skill-add').onclick = async () => {
+  const name = $('skill-name').value.trim();
+  const content = $('skill-content').value.trim();
+  const description = $('skill-desc').value.trim();
+  if (!name || !content) { alert('名称和内容必填'); return; }
+  const r = await fetch('/api/v1/skills', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ name, description, content }),
+  });
+  if (!r.ok) { const d = await r.json(); alert(d.detail || '上传失败'); return; }
+  $('skill-name').value = ''; $('skill-content').value = ''; $('skill-desc').value = '';
+  loadSkills();
+};
+
+// ===== SSE 对话 =====
 async function sendChat(text) {
   if (state.streaming) return;
   state.streaming = true; $('send').disabled = true;
@@ -142,16 +350,18 @@ async function sendChat(text) {
   let aiDiv = null, buf = '';
   try {
     const resp = await fetch('/api/chat', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ message: text, thread_id: state.threadId })
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ message: text, thread_id: state.threadId }),
     });
+    if (resp.status === 401) { clearAuth(); return; }
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let sseBuf = '';
     while (true) {
-      const {done, value} = await reader.read();
+      const { done, value } = await reader.read();
       if (done) break;
-      sseBuf += decoder.decode(value, {stream: true});
+      sseBuf += decoder.decode(value, { stream: true });
       let idx;
       while ((idx = sseBuf.indexOf('\n\n')) >= 0) {
         const frame = sseBuf.slice(0, idx); sseBuf = sseBuf.slice(idx + 2);
@@ -162,24 +372,22 @@ async function sendChat(text) {
         }
         if (!data) continue;
         let payload; try { payload = JSON.parse(data); } catch { continue; }
-        handleEvent(event, payload);
+        if (event === 'start') { state.threadId = payload.thread_id; $('thread-info').textContent = 'thread: ' + payload.thread_id; }
+        else if (event === 'token') {
+          if (!aiDiv) aiDiv = addMsg('ai', '', true);
+          buf += payload.content; aiDiv.textContent = buf;
+          $('messages').scrollTop = $('messages').scrollHeight;
+        }
+        else if (event === 'tool_start') addEvent('', `🔧 <b>${esc(payload.tool)}</b> ${esc(JSON.stringify(payload.args).slice(0, 120))}`);
+        else if (event === 'tool_end') addEvent('', `✅ <b>${esc(payload.tool)}</b> 完成：${esc(payload.result.slice(0, 140))}`);
+        else if (event === 'subagent_start') addEvent('subagent', `🤖 子代理 <b>${esc(payload.agent)}</b> 启动：${esc(payload.description)}`);
+        else if (event === 'subagent_end') addEvent('subagent', `🤖 子代理完成：${esc(payload.report.slice(0, 160))}`);
+        else if (event === 'memory') { addEvent('memory', `🧠 <b>长期记忆</b> ${esc(payload.text)}`); loadMemories(); }
+        else if (event === 'done') { if (aiDiv) aiDiv.classList.remove('streaming'); if (!buf) addMsg('ai', payload.content); }
+        else if (event === 'error') { addEvent('', `⚠️ <b>错误</b> ${esc(payload.message)}`); if (aiDiv) aiDiv.classList.remove('streaming'); }
       }
     }
-    function handleEvent(event, p) {
-      if (event === 'start') { state.threadId = p.thread_id; $('thread-info').textContent = 'thread: ' + p.thread_id; }
-      else if (event === 'token') {
-        if (!aiDiv) aiDiv = addMsg('ai', '', true);
-        buf += p.content; aiDiv.textContent = buf;
-        $('messages').scrollTop = $('messages').scrollHeight;
-      }
-      else if (event === 'tool_start') addEvent('', `🔧 <b>${esc(p.tool)}</b> ${esc(JSON.stringify(p.args).slice(0, 120))}`);
-      else if (event === 'tool_end') addEvent('', `✅ <b>${esc(p.tool)}</b> 完成：${esc(p.result.slice(0, 140))}`);
-      else if (event === 'subagent_start') addEvent('subagent', `🤖 子代理 <b>${esc(p.agent)}</b> 启动：${esc(p.description)}`);
-      else if (event === 'subagent_end') addEvent('subagent', `🤖 子代理完成：${esc(p.report.slice(0, 160))}`);
-      else if (event === 'memory') { addEvent('memory', `🧠 <b>长期记忆</b> ${esc(p.text)}`); loadMemories(); }
-      else if (event === 'done') { if (aiDiv) aiDiv.classList.remove('streaming'); if (!buf) addMsg('ai', p.content); }
-      else if (event === 'error') { addEvent('', `⚠️ <b>错误</b> ${esc(p.message)}`); if (aiDiv) aiDiv.classList.remove('streaming'); }
-    }
+    loadSessions(); // 刷新会话列表
   } catch (e) {
     addEvent('', `⚠️ <b>连接错误</b> ${esc(String(e))}`);
   } finally {
@@ -194,20 +402,27 @@ $('chat-form').onsubmit = e => {
   $('chat-input').value = '';
   sendChat(text);
 };
-$('new-thread').onclick = () => { state.threadId = null; $('thread-info').textContent = 'thread: —'; addEvent('', '🔄 <b>新会话</b>（长期记忆保留）'); };
+$('new-thread').onclick = () => { state.threadId = null; $('messages').innerHTML = ''; $('thread-info').textContent = 'thread: —'; addEvent('', '🔄 <b>新会话</b>（长期记忆保留）'); };
 $('destroy-sandbox').onclick = async () => {
   if (!state.threadId) return;
-  await fetch('/api/threads/' + state.threadId + '/sandbox', {method:'DELETE'});
+  await fetch('/api/threads/' + state.threadId + '/sandbox', { method: 'DELETE', headers: authHeaders() });
   addEvent('', '🗑️ 沙箱已销毁，下一条消息将重建');
 };
 $('mem-add').onclick = async () => {
   const text = $('mem-input').value.trim();
   if (!text) return;
-  await fetch('/api/memories', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
+  await fetch('/api/memories', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ text }) });
   $('mem-input').value = ''; loadMemories();
 };
 
-loadAgents(); loadMemories();
+// ===== 启动 =====
+async function bootstrap() {
+  refreshUserInfo();
+  await loadAgents();
+  await Promise.all([loadMemories(), loadSkills(), loadSessions()]);
+}
+if (state.token) hideAuth(); else showAuth();
+if (state.token) bootstrap();
 </script>
 </body>
 </html>

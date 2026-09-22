@@ -29,13 +29,16 @@ import json
 import logging
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import SYSTEM_PROMPT, SUBAGENTS, build_agent
 from app.api.sandbox_registry import SandboxRegistry
@@ -45,13 +48,47 @@ from app.api.schemas import (
     ChatRequest,
     HistoryMessage,
     HistoryResponse,
+    LoginRequest,
+    LoginResponse,
+    MeResponse,
     MemoryCreate,
     MemoryItem,
     MemoriesResponse,
+    RegisterRequest,
+    RegisterResponse,
+    SessionItem,
+    SessionListResponse,
+    SkillCreateRequest,
+    SkillItem,
+    SkillListResponse,
+)
+from app.auth import (
+    TenantContext,
+    authenticate,
+    get_current_user_dep,
+    register_tenant,
 )
 from app.config import settings
 from app.db import _build_index_config
 from app.memory import memory_namespace
+from app.models import (
+    Message,
+    Session as SessionModel,
+    create_all,
+    get_db,
+    get_session_factory,
+    init_engine,
+    close_engine,
+    list_session_messages,
+    list_user_sessions,
+)
+from app.skill_loader import (
+    SkillMeta,
+    delete_skill,
+    get_skill_dirs,
+    list_skills,
+    register_skill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +125,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         stack = AsyncExitStack()
+        # V1：初始化多租户 ORM engine + 建表（幂等）
+        await init_engine()
+        await create_all()
+
         saver_cm = AsyncPostgresSaver.from_conn_string(settings.database_url)
         store_cm = AsyncPostgresStore.from_conn_string(
             settings.database_url, index=_build_index_config()
@@ -114,8 +155,9 @@ def create_app(
         finally:
             await registry.close()
             await stack.aclose()
+            await close_engine()
 
-    app = FastAPI(title="super-agent API", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="super-agent API", version="0.3.0", lifespan=lifespan)
 
     # ------------------------------------------------------------------ #
     # 静态页
@@ -145,27 +187,244 @@ def create_app(
         )
 
     # ------------------------------------------------------------------ #
+    # V1：多租户认证（注册 / 登录 / me）
+    # ------------------------------------------------------------------ #
+
+    @app.post("/api/v1/tenants/register", response_model=RegisterResponse, status_code=201)
+    async def tenant_register(body: RegisterRequest) -> RegisterResponse:
+        result = await register_tenant(body.name, body.email, body.password)
+        return RegisterResponse(**result)
+
+    @app.post("/api/v1/tenants/login", response_model=LoginResponse)
+    async def tenant_login(body: LoginRequest) -> LoginResponse:
+        ctx, token = await authenticate(body.email, body.password)
+        return LoginResponse(
+            access_token=token,
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            email=ctx.email,
+        )
+
+    @app.get("/api/v1/tenants/me", response_model=MeResponse)
+    async def tenant_me(ctx: TenantContext = Depends(get_current_user_dep)) -> MeResponse:
+        return MeResponse(
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            email=ctx.email,
+            display_name=ctx.display_name,
+        )
+
+    # ------------------------------------------------------------------ #
+    # V1：Skill 管理（列表 / 上传 / 删除）
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/v1/skills", response_model=SkillListResponse)
+    async def skills_list(
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> SkillListResponse:
+        items = list_skills(ctx.tenant_id)
+        return SkillListResponse(
+            items=[
+                SkillItem(
+                    name=m.name,
+                    description=m.description,
+                    content=m.content,
+                    is_global=m.is_global,
+                    tenant_id=m.tenant_id,
+                )
+                for m in items
+            ]
+        )
+
+    @app.post("/api/v1/skills", response_model=SkillItem, status_code=201)
+    async def skills_create(
+        body: SkillCreateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> SkillItem:
+        try:
+            register_skill(
+                tenant_id=ctx.tenant_id,
+                name=body.name,
+                content=body.content,
+                description=body.description,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 写 DB 元数据快照（便于检索）
+        factory = get_session_factory()
+        async with factory() as session:
+            async with session.begin():
+                # 删旧（同 tenant + name 唯一）再插
+                from app.models import Skill as SkillModel
+
+                old = (
+                    await session.execute(
+                        select(SkillModel).where(
+                            SkillModel.tenant_id == ctx.tenant_id,
+                            SkillModel.name == body.name,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if old is not None:
+                    await session.delete(old)
+                session.add(
+                    SkillModel(
+                        tenant_id=ctx.tenant_id,
+                        name=body.name,
+                        description=body.description,
+                        content=body.content,
+                        is_global=False,
+                    )
+                )
+        return SkillItem(
+            name=body.name,
+            description=body.description,
+            content=body.content,
+            is_global=False,
+            tenant_id=ctx.tenant_id,
+        )
+
+    @app.delete("/api/v1/skills/{name}")
+    async def skills_delete(
+        name: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> dict:
+        ok = delete_skill(ctx.tenant_id, name)
+        if not ok:
+            raise HTTPException(status_code=404, detail="skill not found")
+        factory = get_session_factory()
+        async with factory() as session:
+            async with session.begin():
+                from app.models import Skill as SkillModel
+
+                row = (
+                    await session.execute(
+                        select(SkillModel).where(
+                            SkillModel.tenant_id == ctx.tenant_id,
+                            SkillModel.name == name,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if row is not None:
+                    await session.delete(row)
+        return {"deleted": name}
+
+    # ------------------------------------------------------------------ #
+    # V1：会话列表 + 会话内消息历史（按 tenant 隔离）
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/v1/sessions", response_model=SessionListResponse)
+    async def sessions_list(
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> SessionListResponse:
+        sessions = await list_user_sessions(db, ctx.tenant_id, ctx.user_id)
+        return SessionListResponse(
+            items=[
+                SessionItem(
+                    id=s.id,
+                    thread_id=s.thread_id,
+                    title=s.title,
+                    created_at=s.created_at.isoformat(),
+                    last_active_at=s.last_active_at.isoformat(),
+                )
+                for s in sessions
+            ]
+        )
+
+    @app.get("/api/v1/sessions/{session_id}/messages", response_model=HistoryResponse)
+    async def session_messages(
+        session_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> HistoryResponse:
+        # 先取 session 校验归属
+        sess = (
+            await db.execute(
+                select(SessionModel).where(
+                    SessionModel.id == session_id,
+                    SessionModel.tenant_id == ctx.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if sess is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        msgs = await list_session_messages(db, ctx.tenant_id, session_id)
+        return HistoryResponse(
+            thread_id=sess.thread_id,
+            messages=[
+                HistoryMessage(role=m.role, content=m.content) for m in msgs
+            ],
+        )
+
+    # ------------------------------------------------------------------ #
     # SSE 对话（核心）
     # ------------------------------------------------------------------ #
 
     @app.post("/api/chat")
-    async def chat(req: ChatRequest):
+    async def chat(
+        req: ChatRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ):
         thread_id = req.thread_id or uuid.uuid4().hex[:12]
-        user_id = req.user_id or settings.user_id
+        user_id = ctx.user_id  # V1：强制按 JWT 中的 user_id 隔离
         backend = await app.state.registry.acquire(thread_id)
+        # V1：按租户加载 skills 目录（global + tenant 专属）
+        skills_dirs = get_skill_dirs(ctx.tenant_id)
         agent = build_agent(
             backend=backend,
             checkpointer=app.state.checkpointer,
             store=app.state.store,
             user_id=user_id,
             model=app.state.model_override,
+            skills_dirs=skills_dirs,
         )
         config = {"configurable": {"thread_id": thread_id}}
 
+        # V1：会话/消息持久化（首次消息自动创建 session）
+        async def _persist_message(role: str, content: str, tool_name: str | None = None) -> None:
+            factory = get_session_factory()
+            async with factory() as session:
+                async with session.begin():
+                    sess = (
+                        await session.execute(
+                            select(SessionModel).where(
+                                SessionModel.tenant_id == ctx.tenant_id,
+                                SessionModel.thread_id == thread_id,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if sess is None:
+                        sess = SessionModel(
+                            tenant_id=ctx.tenant_id,
+                            user_id=user_id,
+                            thread_id=thread_id,
+                            title=content[:60] or None,
+                        )
+                        session.add(sess)
+                        await session.flush()
+                    else:
+                        sess.last_active_at = datetime.now(timezone.utc)
+                    session.add(
+                        Message(
+                            session_id=sess.id,
+                            tenant_id=ctx.tenant_id,
+                            role=role,
+                            content=content,
+                            tool_name=tool_name,
+                        )
+                    )
+
         async def event_stream() -> AsyncIterator[str]:
-            yield sse("start", {"thread_id": thread_id, "user_id": user_id})
+            yield sse("start", {
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "tenant_id": ctx.tenant_id,
+            })
             collected: list[str] = []
             try:
+                # 持久化用户消息
+                await _persist_message("human", req.message)
                 async for payload in agent.astream(
                     # 注意：deepagents 0.7 的 DeltaChannel 不兼容 ("user", text)
                     # 元组快捷格式（会产生一条脏 human 消息），必须用显式 HumanMessage
@@ -177,9 +436,12 @@ def create_app(
                         if event[0] == "token":
                             collected.append(event[1]["content"])
                         yield sse(*event)
+                full_reply = "".join(collected)
+                if full_reply:
+                    await _persist_message("ai", full_reply)
                 yield sse(
                     "done",
-                    {"thread_id": thread_id, "content": "".join(collected)},
+                    {"thread_id": thread_id, "content": full_reply},
                 )
             except Exception as exc:
                 logger.exception("SSE 对话失败")

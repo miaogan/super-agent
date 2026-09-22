@@ -117,6 +117,7 @@ def build_agent(
     store=None,
     user_id: str | None = None,
     model: str | BaseChatModel | None = None,
+    skills_dirs: list[str] | None = None,
 ):
     """组装 deep agent。
 
@@ -126,10 +127,11 @@ def build_agent(
         store: LangGraph BaseStore（长期记忆）；None 则记忆工具不可用。
         user_id: 长期记忆归属用户（默认取配置）。
         model: 覆盖默认模型（测试注入 fake 模型用）。
+        skills_dirs: Skill 目录列表（V1：global + tenant 隔离目录）；空则不加载 skill。
     """
     user_id = user_id or settings.user_id
     tools = create_memory_tools(user_id, store) if store is not None else []
-    return create_deep_agent(
+    kwargs: dict = dict(
         model=model or load_model(),
         system_prompt=SYSTEM_PROMPT,
         tools=tools,
@@ -142,3 +144,7 @@ def build_agent(
         checkpointer=checkpointer,
         store=store,
     )
+    # V1：传入 skills 目录，deepagents 自动扫描 SKILL.md 注入能力
+    if skills_dirs:
+        kwargs["skills"] = skills_dirs
+    return create_deep_agent(**kwargs)

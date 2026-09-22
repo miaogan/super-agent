@@ -1,5 +1,5 @@
 services:
-  # PostgreSQL：多轮对话（checkpointer）+ 长期记忆（store）的持久化后端
+  # PostgreSQL：多轮对话（checkpointer）+ 长期记忆（store）+ V1 多租户表的持久化后端
   postgres:
     image: postgres:16-alpine
     container_name: agent-postgres
@@ -16,6 +16,31 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # V1：FastAPI + 前端一体化容器
+  # 本地开发可直接 `python server.py`；docker 形式方便一键部署
+  app:
+    build: .
+    container_name: agentforge-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://agent:agent_pass@postgres:5432/agent_memory
+      MODEL: ${MODEL:-anthropic:claude-sonnet-4-6}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENSANDBOX_DOMAIN: ${OPENSANDBOX_DOMAIN:-host.docker.internal:8080}
+      OPENSANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-local-dev-key}
+      OPENSANDBOX_IMAGE: ${OPENSANDBOX_IMAGE:-python:3.11-slim}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      SKILLS_DIR: ${SKILLS_DIR:-skills}
+      SANDBOX_MODE: ${SANDBOX_MODE:-shared}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./skills:/app/skills
+      - ./.env:/app/.env:ro
 
   # OpenSandbox 服务端（可选）：
   # 服务端需要访问宿主机 Docker daemon 来创建沙箱容器，

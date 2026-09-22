@@ -77,5 +77,14 @@ class Settings:
     # 会话
     user_id: str = field(default_factory=lambda: os.getenv("USER_ID", "demo_user"))
 
+    # ===== V1：多租户认证 =====
+    jwt_secret: str = field(default_factory=lambda: os.getenv("JWT_SECRET", "change-me-in-production"))
+    jwt_algorithm: str = field(default_factory=lambda: os.getenv("JWT_ALGORITHM", "HS256"))
+    jwt_expire_minutes: int = field(default_factory=lambda: _optional_int("JWT_EXPIRE_MINUTES") or 1440)
+
+    # ===== V1：Skill 加载 =====
+    # Skill 根目录：global skill 在 skills/global/，租户专属在 skills/tenants/{tenant_id}/
+    skills_dir: str = field(default_factory=lambda: os.getenv("SKILLS_DIR", "skills"))
+
 
 settings = Settings()
