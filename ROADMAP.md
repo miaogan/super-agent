@@ -125,6 +125,8 @@
 
 > **定位**：不拆微服务（留 V3），补齐 V2 暴露的 5 大能力缺口，从「演示级」→「可生产级」。
 > **原则**：编排补强优先（workflow engine 硬伤），RAG + MCP + 治理三线并进，K8s 收尾。
+>
+> **状态：进行中** — 已完成 T1 条件分支 / T2 人机协同 / T3 并行子代理 / T4 RAG 接口预留 / T5 RAG 工具注入 / T6 MCP 协议 / T7 工具市场 / T8 配额限流 / T9 审计日志 / T10 API Key 轮转+灰度发布 / T11 K8s Helm / T12 OTel 全链路可观测+告警；T13 E2E 联调待推进。
 
 ## 差距诊断（V2 验收后）
 
@@ -146,18 +148,18 @@
 
 | 任务 | 目标 | 周期 | 依赖 | 优先级 |
 |---|---|---|---|---|
-| **V2.5-T1** 条件分支节点 | `if`/`switch` 节点 + 表达式求值器 + 编译器扩展 + 前端节点面板 | 1 周 | V2-T2 | 高 |
-| **V2.5-T2** 人机协同（HIL） | `interrupt()` + 恢复 + 审批节点 + 前端审批 UI（挂起→人工确认→续跑） | 1 周 | V2-T5 | 高 |
-| **V2.5-T3** 并行子代理 | `fan-out`/`fan-in` + 结果合并策略（first/all/merge） | 5 天 | V2-T4 | 中 |
-| **V2.5-T4** RAG 对接接口预留 | 定义 RAG service 接口契约（query→contexts+citation）+ stub 实现 + 配置项指向外部 LightRAG 服务地址 | 2 天 | V2-T11 | 高 |
-| **V2.5-T5** RAG 工具注入 + 引用渲染 | Agent 工具 `retrieve_knowledge` 调用外部 RAG 服务 + 前端 citation 渲染 + 联调开关（stub/真实） | 3 天 | T4 | 中 |
-| **V2.5-T6** MCP 协议支持 | MCP client + 工具自动发现 + 安全沙箱（限定工具能力域） | 1 周 | — | 高 |
-| **V2.5-T7** 工具市场骨架 | 插件 manifest + 注册中心 + 一键安装 + 权限校验 | 5 天 | T6 | 中 |
-| **V2.5-T8** 配额与限流 | QPS / Token / 调用次数 + 租户级配额 + Redis 令牌桶 | 5 天 | V2 多租户 | 高 |
-| **V2.5-T9** 审计日志 | 操作审计 + 数据访问审计 + 审计查询 API + 保留策略 | 5 天 | T8 | 中 |
-| **V2.5-T10** API Key 轮转 + 灰度发布 | Key 生命周期（创建/吊销/轮转） + Workflow 版本灰度（流量切分） | 5 天 | T8 | 中 |
-| **V2.5-T11** K8s Helm chart + 水平扩容 | Helm chart + HPA + 配置外部化（ConfigMap/Secret） + PV 持久化 | 1 周 | V2 Docker | 高 |
-| **V2.5-T12** OTel 全链路可观测 + 告警 | OTLP exporter + Prometheus + Grafana dashboard + 告警规则 | 5 天 | T11 | 中 |
+| **V2.5-T1** 条件分支节点 | `if`/`switch` 节点 + 表达式求值器 + 编译器扩展 + 前端节点面板 | 1 周 | V2-T2 | 高 ✅ |
+| **V2.5-T2** 人机协同（HIL） | `interrupt()` + 恢复 + 审批节点 + 前端审批 UI（挂起→人工确认→续跑） | 1 周 | V2-T5 | 高 ✅ |
+| **V2.5-T3** 并行子代理 | `fan-out`/`fan-in` + 结果合并策略（first/all/merge） | 5 天 | V2-T4 | 中 ✅ |
+| **V2.5-T4** RAG 对接接口预留 | 定义 RAG service 接口契约（query→contexts+citation）+ stub 实现 + 配置项指向外部 LightRAG 服务地址 | 2 天 | V2-T11 | 高 ✅ |
+| **V2.5-T5** RAG 工具注入 + 引用渲染 | Agent 工具 `retrieve_knowledge` 调用外部 RAG 服务 + 前端 citation 渲染 + 联调开关（stub/真实） | 3 天 | T4 | 中 ✅ |
+| **V2.5-T6** MCP 协议支持 | MCP client + 工具自动发现 + 安全沙箱（限定工具能力域） | 1 周 | — | 高 ✅ |
+| **V2.5-T7** 工具市场骨架 | 插件 manifest + 注册中心 + 一键安装 + 权限校验 | 5 天 | T6 | 中 ✅ |
+| **V2.5-T8** 配额与限流 | QPS / Token / 调用次数 + 租户级配额 + Redis 令牌桶 | 5 天 | V2 多租户 | 高 ✅ |
+| **V2.5-T9** 审计日志 | 操作审计 + 数据访问审计 + 审计查询 API + 保留策略 | 5 天 | T8 | 中 ✅ |
+| **V2.5-T10** API Key 轮转 + 灰度发布 | Key 生命周期（创建/吊销/轮转） + Workflow 版本灰度（流量切分） | 5 天 | T8 | 中 ✅ |
+| **V2.5-T11** K8s Helm chart + 水平扩容 | Helm chart + HPA + 配置外部化（ConfigMap/Secret） + PV 持久化 | 1 周 | V2 Docker | 高 ✅ |
+| **V2.5-T12** OTel 全链路可观测 + 告警 | OTLP exporter + Prometheus + Grafana dashboard + 告警规则 | 5 天 | T11 | 中 ✅ |
 | **V2.5-T13** E2E 联调 | 条件分支→HIL→RAG→MCP→配额→审计全链路 | 5 天 | 全部 | 高 |
 
 ## V2.5 验收

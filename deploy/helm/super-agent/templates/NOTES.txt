@@ -1,0 +1,63 @@
+{{/* helm install 后展示的提示信息 */}}
+Super-Agent chart installed as release "{{ .Release.Name }}".
+
+Components:
+{{- if .Values.postgresql.enabled }}
+  - PostgreSQL: {{ include "super-agent.postgresqlFullname" . }} (StatefulSet + PVC, {{ .Values.postgresql.persistence.size }})
+{{- else }}
+  - PostgreSQL: external ({{ .Values.externalDatabase.host | default "external url" }})
+{{- end }}
+  - Backend : {{ include "super-agent.backendFullname" . }} ({{ .Values.backend.replicaCount }} replicas{{ if .Values.backend.hpa.enabled }}, HPA {{ .Values.backend.hpa.minReplicas }}-{{ .Values.backend.hpa.maxReplicas }}{{ end }})
+  - Frontend: {{ include "super-agent.frontendFullname" . }} ({{ .Values.frontend.replicaCount }} replicas{{ if .Values.frontend.hpa.enabled }}, HPA {{ .Values.frontend.hpa.minReplicas }}-{{ .Values.frontend.hpa.maxReplicas }}{{ end }})
+{{- if .Values.observability.enabled }}
+  - OTel Collector: {{ include "super-agent.otelCollectorFullname" . }} (OTLP HTTP :4318 / gRPC :4317 / Prometheus exporter :{{ .Values.observability.otelCollector.ports.promExporter }})
+  - Prometheus: {{ include "super-agent.prometheusFullname" . }} (UI :9090, retention {{ .Values.observability.prometheus.retention }})
+  - Grafana: {{ include "super-agent.grafanaFullname" . }} (UI :{{ .Values.observability.grafana.service.port }}, admin/{{ .Values.observability.grafana.adminPassword }})
+  - Alertmanager: {{ include "super-agent.alertmanagerFullname" . }} (UI :{{ .Values.observability.alertmanager.service.port }})
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+
+Access via Ingress:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ (index .paths 0).path }}
+{{- end }}
+{{- else }}
+
+Port-forward to access:
+  export FE_POD=$(kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=frontend -o jsonpath='{.items[0].metadata.name}')
+  kubectl port-forward $FE_POD -n {{ .Release.Namespace }} 8080:80
+  open http://localhost:8080
+
+  export BE_POD=$(kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=backend -o jsonpath='{.items[0].metadata.name}')
+  kubectl port-forward $BE_POD -n {{ .Release.Namespace }} 8000:8000
+{{- end }}
+{{- if .Values.observability.enabled }}
+
+Observability port-forward:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "super-agent.grafanaFullname" . }} 3000:{{ .Values.observability.grafana.service.port }}
+  open http://localhost:3000  (admin / {{ .Values.observability.grafana.adminPassword }})
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "super-agent.prometheusFullname" . }} 9090:9090
+  open http://localhost:9090  (查询 /api/v1/alerts 查看活跃告警)
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "super-agent.alertmanagerFullname" . }} 9093:{{ .Values.observability.alertmanager.service.port }}
+  open http://localhost:9093  (查看告警分发)
+{{- end }}
+
+Next steps:
+1. Verify pods: kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+2. Check backend logs: kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "super-agent.backendFullname" . }}
+3. Run migrations (if any): kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "super-agent.backendFullname" . }} -- python -c "import app.db; app.db.init_db()"
+4. Update configs: helm upgrade {{ .Release.Name }} . -f custom-values.yaml
+
+⚠ 生产建议：
+  - 用 externalDatabase 接外部托管 PG，避免单点 PG
+  - 用 --set secret.existingSecret=<name> 复用外部 Secret
+  - 启用 ingress + TLS 对外暴露
+  - skillsPersistence.enabled=true 持久化 skills（需 RWX StorageClass）
+{{- if .Values.observability.enabled }}
+  - 开启可观测性：helm upgrade {{ .Release.Name }} . --set config.otelEnabled=1 --set config.prometheusEnabled=1 --set observability.enabled=true
+  - 生产 Grafana adminPassword 必改
+  - 告警通知：在 values 的 observability.alertmanager.config 配置 Slack/PagerDuty
+{{- end }}

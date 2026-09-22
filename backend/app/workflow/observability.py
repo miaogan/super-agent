@@ -66,6 +66,19 @@ class TraceCollector:
         # 退出时自动落库
     """
 
+    # V2.5-T12：全局 hook，事件镜像到 OTel + Prometheus
+    # 签名：(tc, event: str, **payload) -> None
+    _hook: Any = None
+
+    @classmethod
+    def set_hook(cls, hook: Any) -> None:
+        """注册全局事件 hook（如 OTel 桥接）。None 清除。"""
+        cls._hook = hook
+
+    @classmethod
+    def get_hook(cls) -> Any:
+        return cls._hook
+
     def __init__(
         self,
         *,
@@ -85,21 +98,39 @@ class TraceCollector:
         self._error: str | None = None
         self._db_sink: Any = None  # 注入测试用
 
+    def _emit(self, event: str, **payload: Any) -> None:
+        """触发全局 hook（如已注册）。"""
+        hook = TraceCollector._hook
+        if hook is None:
+            return
+        try:
+            hook(self, event, **payload)
+        except Exception:
+            logger.debug("trace hook failed", exc_info=True)
+
     def span(
         self, name: str, attrs: dict[str, Any] | None = None
     ) -> "_SpanContextManager":
         """开启一个 span（contextmanager 用法）。"""
         s = Span(name=name, attrs=attrs or {})
         self._spans.append(s)
-        return _SpanContextManager(s)
+        return _SpanContextManager(s, self)
 
     def add_tokens(self, *, input: int = 0, output: int = 0) -> None:
         self._token_input += input
         self._token_output += output
+        # V2.5-T12：镜像到 OTel + Prometheus
+        self._emit(
+            "tokens",
+            input=input,
+            output=output,
+            tenant=self.tenant_id,
+        )
 
     def set_error(self, error: str) -> None:
         self._status = "error"
         self._error = error
+        self._emit("error", type=type(self).__name__, message=error, tenant=self.tenant_id)
 
     @property
     def duration_ms(self) -> int:
@@ -115,6 +146,15 @@ class TraceCollector:
             status = "error"
         elif any(s.status == "error" for s in self._spans):
             status = "error"
+
+        # V2.5-T12：workflow 结束事件镜像到 OTel + Prometheus
+        if self.workflow_id:
+            self._emit(
+                "workflow_end",
+                workflow_id=self.workflow_id,
+                status=status,
+                tenant=self.tenant_id,
+            )
 
         if db is not None:
             from app.models import Trace  # noqa: PLC0415
@@ -167,8 +207,9 @@ class TraceCollector:
 class _SpanContextManager:
     """span 的同步 contextmanager（async with 太重，span 用 sync with）。"""
 
-    def __init__(self, span: Span) -> None:
+    def __init__(self, span: Span, tc: "TraceCollector | None" = None) -> None:
         self._span = span
+        self._tc = tc
 
     def __enter__(self) -> Span:
         return self._span
@@ -178,6 +219,14 @@ class _SpanContextManager:
         if exc is not None:
             self._span.status = "error"
             self._span.error = f"{exc_type.__name__}: {exc}"
+        # V2.5-T12：span 结束事件镜像到 OTel + Prometheus
+        if self._tc is not None:
+            self._tc._emit(
+                "span_end",
+                name=self._span.name,
+                duration_ms=self._span.duration_ms,
+                status=self._span.status,
+            )
         return False
 
 

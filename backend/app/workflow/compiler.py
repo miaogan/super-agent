@@ -40,8 +40,27 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-# 支持的节点类型
-NODE_TYPES = {"start", "agent", "tool", "subagent", "end"}
+from app.workflow.branch import (
+    BranchRoute,
+    extract_branches,
+    validate_branch_nodes,
+)
+from app.workflow.hil import (
+    ApprovalNodeSpec,
+    validate_approval_nodes,
+)
+
+# 支持的节点类型（V2.5 扩展：if / switch / approval）
+NODE_TYPES = {
+    "start",
+    "agent",
+    "tool",
+    "subagent",
+    "if",
+    "switch",
+    "approval",
+    "end",
+}
 
 
 class CompileError(ValueError):
@@ -57,6 +76,10 @@ class CompiledConfig:
     tools: list[str] = field(default_factory=list)  # 工具名集合
     skills: list[str] = field(default_factory=list)  # skill 名集合
     subagents: list[dict[str, Any]] = field(default_factory=list)
+    # V2.5：分支路由表（if/switch 节点的编译期元信息）
+    branches: list[BranchRoute] = field(default_factory=list)
+    # V2.5-T2：审批节点 spec 列表（按拓扑序）
+    approvals: list[ApprovalNodeSpec] = field(default_factory=list)
     # 原始拓扑序（调试用）
     topological_order: list[str] = field(default_factory=list)
 
@@ -67,6 +90,18 @@ class CompiledConfig:
             "tools": self.tools,
             "skills": self.skills,
             "subagents": self.subagents,
+            "branches": [b.to_dict() for b in self.branches],
+            "approvals": [
+                {
+                    "node_id": a.node_id,
+                    "message": a.message,
+                    "assignee": a.assignee,
+                    "timeout_seconds": a.timeout_seconds,
+                    "on_approve": a.on_approve,
+                    "on_reject": a.on_reject,
+                }
+                for a in self.approvals
+            ],
             "topological_order": self.topological_order,
         }
 
@@ -123,6 +158,11 @@ def validate_definition(definition: dict[str, Any] | str) -> tuple[list[dict], l
     ends = [n for n in nodes if n["type"] == "end"]
     if not ends:
         raise CompileError("必须至少有一个 end 节点")
+
+    # V2.5：if/switch 节点结构校验
+    validate_branch_nodes(nodes)
+    # V2.5-T2：approval 节点结构校验
+    validate_approval_nodes(nodes)
 
     in_deg: dict[str, int] = {n["id"]: 0 for n in nodes}
     out_deg: dict[str, int] = {n["id"]: 0 for n in nodes}
@@ -227,4 +267,13 @@ def compile_workflow(definition: dict[str, Any] | str) -> CompiledConfig:
     cfg.system_prompt = cfg.system_prompt.rstrip("\n-").rstrip()
     if not cfg.system_prompt:
         cfg.system_prompt = "你是一个有用的助手。"
+
+    # V2.5：提取 if/switch 分支路由表
+    cfg.branches = extract_branches(nodes, edges)
+    # V2.5-T2：提取 approval 节点 spec（按拓扑序）
+    cfg.approvals = [
+        ApprovalNodeSpec.from_node(node_map[nid])
+        for nid in order
+        if node_map[nid].get("type") == "approval"
+    ]
     return cfg

@@ -1,0 +1,33 @@
+{{/* 前端 nginx 配置：用 helm 生成的后端 Service 名替换硬编码 backend */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "super-agent.frontendFullname" . }}-nginx
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        location /api/ {
+            proxy_pass http://{{ include "super-agent.backendFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.backend.port }};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+        }
+    }

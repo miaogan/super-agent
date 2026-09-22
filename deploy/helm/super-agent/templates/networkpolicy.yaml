@@ -1,0 +1,53 @@
+{{/* NetworkPolicy：限制 Pod 间流量（可选，默认不启用） */}}
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io
+kind: NetworkPolicy
+metadata:
+  name: {{ include "super-agent.fullname" . }}-deny-default
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "super-agent.name" . }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # 前端接受外部流量（来自 Ingress）
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "super-agent.name" . }}
+        - namespaceSelector: {}
+    # 前端访问后端 8000
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: frontend
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    # DNS
+    - to: []
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # 出网（LLM API / 沙箱）
+    - to: []
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+    # Pod 间（前端→后端，后端→PG）
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "super-agent.name" . }}
+{{- end -}}

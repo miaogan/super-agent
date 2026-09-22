@@ -364,6 +364,260 @@ class Prompt(Base):
 
 
 # ---------------------------------------------------------------------- #
+# V2.5-T2：人机协同（HIL）interrupt 持久化
+# ---------------------------------------------------------------------- #
+
+
+class Interrupt(Base):
+    """HIL interrupt 记录（V2.5-T2）。
+
+    - 复用 LangGraph ``interrupt()`` 暂停图执行；本表存业务态。
+    - 状态机：``pending`` → ``approved`` / ``rejected`` / ``expired`` / ``cancelled``
+    - ``payload`` 为审批上下文 JSON（上游节点输出快照 + 待审内容预览）。
+    - ``resume_value`` 为恢复时传给 ``Command(resume=...)`` 的值（JSON）。
+    - ``expires_at`` 超时自动 expire（由后台任务扫描）。
+    """
+
+    __tablename__ = "interrupts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    workflow_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
+    node_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 审批上下文 JSON：{"input": ..., "preview": ..., "prior_steps": [...]}
+    payload: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    # 指派审批人 user_id；空 = 任何租户成员可审
+    assignee: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    timeout_seconds: Mapped[int] = mapped_column(default=24 * 60 * 60, nullable=False)
+    # 状态：pending / approved / rejected / expired / cancelled
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False
+    )
+    # 决策：approve / reject / cancel
+    decision: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    decision_comment: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    decided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_interrupts_tenant", "tenant_id"),
+        Index("ix_interrupts_thread", "thread_id"),
+        Index("ix_interrupts_status", "tenant_id", "status"),
+        Index("ix_interrupts_assignee", "tenant_id", "assignee", "status"),
+        Index("ix_interrupts_expires", "status", "expires_at"),
+    )
+
+
+# ---------------------------------------------------------------------- #
+# V2.5-T9：审计日志
+# ---------------------------------------------------------------------- #
+
+
+class AuditEventModel(Base):
+    """审计事件（V2.5-T9）。
+
+    - ``category``：operation（用户操作）/ data_access（数据访问）
+    - ``actor``：操作发起人 user_id；系统操作用 "system"
+    - ``action``：动作名（如 ``workflow.create`` / ``hil.resume`` / ``memory.read``）
+    - ``resource_type`` + ``resource_id``：被操作的资源
+    - ``result``：success / failure / denied
+    - ``detail``：JSON 上下文（请求体摘要、错误信息等）
+    - ``created_at``：事件时间（按保留策略定期清理）
+    """
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    category: Mapped[str] = mapped_column(String(32), default="operation", nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), default="system", nullable=False)
+    action: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result: Mapped[str] = mapped_column(String(16), default="success", nullable=False)
+    detail: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_audit_tenant", "tenant_id"),
+        Index("ix_audit_actor", "tenant_id", "actor"),
+        Index("ix_audit_action", "tenant_id", "action"),
+        Index("ix_audit_resource", "tenant_id", "resource_type", "resource_id"),
+        Index("ix_audit_category", "tenant_id", "category"),
+        Index("ix_audit_result", "tenant_id", "result"),
+        Index("ix_audit_created", "created_at"),
+    )
+
+
+# ---------------------------------------------------------------------- #
+# V2.5-T7：工具市场骨架
+# ---------------------------------------------------------------------- #
+
+
+class ToolPlugin(Base):
+    """工具市场已安装插件（V2.5-T7）。
+
+    一个 ``ToolPlugin`` 行 = 某租户安装的一个工具包。``manifest`` 存原始
+    manifest JSON（含 name / version / description / author / source /
+    permissions / type / config），``status`` 跟踪生命周期：
+    ``installed`` → ``enabled`` → ``disabled`` / ``uninstalled``。
+
+    - ``tenant_id`` + ``name`` 唯一约束：同一租户同名插件不能重复安装
+    - ``manifest``：原始 manifest JSON 字符串（含校验过的字段）
+    - ``permissions``：扁平化的已批准权限清单（逗号分隔，便于查询/审计）
+    - ``source``：mcp / skill / builtin（与 manifest.type 对齐，冗余存储便于查询）
+    - ``checksum``：manifest 内容 sha256，用于校验未篡改（安装时算）
+    """
+
+    __tablename__ = "tool_plugins"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), default="0.0.0", nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    author: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="mcp", nullable=False)
+    # 原始 manifest JSON
+    manifest: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    # 扁平已批准权限（逗号分隔，便于 SQL 查询和审计）
+    permissions: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # manifest 内容 sha256（安装时算，用于校验未篡改）
+    checksum: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    # installed / enabled / disabled / uninstalled
+    status: Mapped[str] = mapped_column(
+        String(16), default="installed", nullable=False
+    )
+    installed_by: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    installed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        # 同租户 + 同名唯一
+        Index("ix_tool_plugins_tenant_name", "tenant_id", "name", unique=True),
+        Index("ix_tool_plugins_tenant", "tenant_id"),
+        Index("ix_tool_plugins_status", "tenant_id", "status"),
+        Index("ix_tool_plugins_source", "tenant_id", "source"),
+    )
+
+
+# ---------------------------------------------------------------------- #
+# V2.5-T10：API Key 轮转 + Workflow 灰度发布
+# ---------------------------------------------------------------------- #
+
+
+class ApiKey(Base):
+    """租户级 API Key（V2.5-T10）。
+
+    - 一个租户可有多把 API Key（不同环境 / 不同微服务 / 不同应用接入）
+    - ``key_hash``：sha256 hash，不存明文；明文仅在创建/轮转时返回一次
+    - ``prefix``：明文 key 前 8 字符（便于列表里识别，如 ``af-1a2b3c4d``）
+    - ``status``：active / revoked / expired / rotated（rotated=被新 key 替换）
+    - ``expires_at``：可选过期时间（None=永久）；过期后 status 自动切 expired
+    - ``last_used_at``：上次被使用时间（用于审计 + 排查异常）
+    - ``rotated_from``：若由轮转产生，记录原 key id（链路追溯）
+    """
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), default="default", nullable=False)
+    # sha256 hash（前缀 "sha256:"），便于 resolve 时直接 lookup
+    key_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    prefix: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    # active / revoked / expired / rotated
+    status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rotated_from: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_api_keys_tenant", "tenant_id"),
+        Index("ix_api_keys_tenant_status", "tenant_id", "status"),
+        Index("ix_api_keys_hash", "key_hash", unique=True),
+        Index("ix_api_keys_expires", "status", "expires_at"),
+    )
+
+
+class WorkflowRelease(Base):
+    """Workflow 灰度发布（V2.5-T10）。
+
+    一个 ``WorkflowRelease`` = 一个 Workflow 的「版本权重表」。
+    - ``weights`` 是 JSON：``{"v1": 90, "v2": 10}``（key 是 version 号，value 是 0-100 权重）
+    - ``status``：draft / active / paused / archived
+    - 一个 workflow 同时只能有一个 active release（由业务校验）
+    - ``sticky_session``：是否粘性会话（同一 session_id 多次请求落同一 version）
+    - ``sticky_ttl_seconds``：粘性 TTL（超时后重新按权重选）
+    - ``created_by``：发布人 user_id
+    """
+
+    __tablename__ = "workflow_releases"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    workflow_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    # {"v1": 90, "v2": 10}
+    weights: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    # draft / active / paused / archived
+    status: Mapped[str] = mapped_column(
+        String(16), default="draft", nullable=False
+    )
+    sticky_session: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sticky_ttl_seconds: Mapped[int] = mapped_column(default=3600, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_workflow_releases_tenant", "tenant_id"),
+        Index("ix_workflow_releases_workflow", "workflow_id"),
+        Index("ix_workflow_releases_status", "tenant_id", "workflow_id", "status"),
+    )
+
+
+# ---------------------------------------------------------------------- #
 # 引擎 / 会话工厂
 # ---------------------------------------------------------------------- #
 

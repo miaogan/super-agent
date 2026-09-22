@@ -1,0 +1,19 @@
+{{- if .Values.postgresql.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "super-agent.postgresqlFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless，配合 StatefulSet 稳定 DNS
+  ports:
+    - name: tcp-pg
+      port: 5432
+      targetPort: tcp-pg
+  selector:
+    {{- include "super-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+{{- end -}}

@@ -104,13 +104,49 @@ export type SseEvent =
   | { event: 'subagent_start'; data: { agent: string; description: string } }
   | { event: 'subagent_end'; data: { agent: string; report: string } }
   | { event: 'memory'; data: { text: string } }
+  | {
+      event: 'citation'
+      data: {
+        contexts: RagContext[]
+        citation: RagCitation[]
+        mode: string
+        elapsed_ms: number
+        error?: string | null
+      }
+    }
   | { event: 'done'; data: { thread_id: string; content: string } }
   | { event: 'error'; data: { message: string } }
 
+/** RAG 检索上下文片段（与 backend RAGContext 对齐） */
+export interface RagContext {
+  content: string
+  score: number
+  source: string
+  metadata: Record<string, unknown>
+}
+
+/** RAG 引用元信息（与 backend RAGCitation 对齐） */
+export interface RagCitation {
+  doc_id: string
+  title: string
+  page: number | null
+  chunk_id: string
+  url: string
+  metadata: Record<string, unknown>
+}
+
 export interface ChatMessage {
-  role: 'user' | 'ai' | 'event'
+  role: 'user' | 'ai' | 'event' | 'citation'
   content: string
   subtype?: '' | 'subagent' | 'memory'
+  /** citation 类型消息携带的引用列表 */
+  citations?: RagCitation[]
+  /** citation 类型消息携带的上下文片段 */
+  contexts?: RagContext[]
+  /** citation 类型消息的检索模式（stub/live/degraded） */
+  ragMode?: string
+  /** citation 类型消息的错误信息 */
+  ragError?: string | null
 }
 
 // ===== V2：Workflow / 编译 / 编排 / 检查点 =====

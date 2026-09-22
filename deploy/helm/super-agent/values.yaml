@@ -1,0 +1,351 @@
+# ===== 全局 =====
+nameOverride: ""
+fullnameOverride: ""
+
+# ===== 镜像 =====
+# 默认用本地构建的镜像名；生产应推到 registry 并覆盖 tag
+backend:
+  image:
+    repository: super-agent-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  # 资源请求/限制（HPA 基于 cpu 请求）
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+  # HPA 水平扩容（需集群装 metrics-server）
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  # 健康检查（FastAPI /api/health）
+  livenessProbe:
+    httpGet:
+      path: /api/health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 30
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+frontend:
+  image:
+    repository: super-agent-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+# ===== PostgreSQL =====
+# 用内置 PostgreSQL（StatefulSet + PVC）便于快速部署；
+# 生产建议用外部托管 PG（云 RDS），通过 externalDatabase 配置
+postgresql:
+  enabled: true
+  image: postgres:16-alpine
+  auth:
+    username: agent
+    password: agent_pass  # 生产应从 secret 注入或用 externalDatabase
+    database: agent_memory
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""  # 空则用集群默认 StorageClass
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+# 外部 PostgreSQL（postgresql.enabled=false 时使用）
+externalDatabase:
+  url: ""  # postgresql://user:pass@host:5432/db
+  # 或拆开填
+  host: ""
+  port: 5432
+  username: ""
+  password: ""
+  database: ""
+
+# ===== 配置外部化（ConfigMap + Secret）=====
+# 非敏感配置进 ConfigMap，敏感配置进 Secret
+config:
+  # LLM 模型配置（非敏感）
+  model: "anthropic:claude-sonnet-4-6"
+  openaiBaseUrl: ""
+  embeddingModel: ""
+  embeddingBaseUrl: ""
+  # 沙箱
+  opensandboxDomain: "opensandbox:8080"
+  opensandboxImage: "python:3.11-slim"
+  sandboxMode: "shared"
+  skillsDir: "skills"
+  # 会话
+  userId: "demo_user"
+  # V2 认证
+  jwtAlgorithm: "HS256"
+  jwtExpireMinutes: "1440"
+  # CORS
+  corsOrigins: "*"
+  # V2.5-T4 RAG（默认 stub，联调时切 live）
+  ragMode: "stub"
+  ragBaseUrl: ""
+  ragTopK: "5"
+  ragFailOpen: "1"
+  # V2.5-T8 配额限流
+  rateLimitEnabled: "0"
+  rateLimitQps: "10"
+  rateLimitDailyTokens: "100000"
+  rateLimitDailyCalls: "1000"
+  rateLimitRedisUrl: ""
+  # V2.5-T9 审计
+  auditRetentionDays: "90"
+  # V2.5-T6 MCP（JSON 数组字符串）
+  mcpServers: ""
+  # V2.5-T12 OTel + Prometheus 可观测性
+  otelEnabled: "0"  # 1=启用 OTLP trace 推送（需 opentelemetry-sdk）
+  otelServiceName: "super-agent-backend"
+  otelExporterOtlpEndpoint: "http://otel-collector:4318"
+  otelExporterOtlpProtocol: "http/protobuf"
+  prometheusEnabled: "0"  # 1=暴露 /metrics 端点供 Prometheus 抓取
+
+# 敏感配置（Secret）—— 生产应从外部 secret 注入（--set-secret 或 ExternalSecrets）
+secret:
+  # JWT 签名密钥（生产必改）
+  jwtSecret: "change-me-in-production"
+  # LLM API Key
+  openaiApiKey: ""
+  anthropicApiKey: ""
+  embeddingApiKey: ""
+  # OpenSandbox API Key
+  opensandboxApiKey: "local-dev-key"
+  # RAG API Key（live 模式用）
+  ragApiKey: ""
+  # 是否用外部 Secret（已存在的 secret 名）
+  existingSecret: ""  # 非空则不创建新 Secret，从该 secret 取 key
+
+# ===== Service =====
+service:
+  backend:
+    type: ClusterIP
+    port: 8000
+  frontend:
+    type: ClusterIP
+    port: 80
+
+# ===== Ingress =====
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # 域名
+  hosts:
+    - host: agent.local
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend  # frontend | backend
+  tls: []
+  # - secretName: agent-tls
+  #   hosts:
+  #     - agent.local
+
+# ===== 持久化：Skills 目录 =====
+# Skills 目录默认用 emptyDir（重启丢失）；生产建议挂 PVC
+skillsPersistence:
+  enabled: false
+  size: 1Gi
+  storageClass: ""
+
+# ===== NetworkPolicy（可选，默认不启用）=====
+networkPolicy:
+  enabled: false
+
+# ===== Pod 安全上下文 =====
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+containerSecurityContext:
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ===== 节点选择 / 亲和 / 污点容忍 =====
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# ===== 镜像拉取凭证 =====
+imagePullSecrets: []
+
+# ===== V2.5-T12 可观测性栈（OTel Collector + Prometheus + Grafana + Alertmanager）=====
+# 启用后部署完整监控栈；backend 通过 /metrics 暴露 Prometheus 指标，
+# OTel Collector 接收 OTLP trace 并转发到 Prometheus（exemplar）+ Grafana Tempo（可选）。
+# 告警规则经 Prometheus → Alertmanager → 通知渠道（邮箱/Slack/PagerDuty）。
+observability:
+  enabled: false  # 全局开关：false 则不部署任何监控组件
+  # --- OTel Collector ---
+  otelCollector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+    # 接收端口（Service 暴露）
+    ports:
+      otlpHttp: 4318   # OTLP/HTTP（backend 默认推送）
+      otlpGrpc: 4317   # OTLP/gRPC
+      promExporter: 8889  # Prometheus exporter（供 Prometheus 抓取）
+  # --- Prometheus ---
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    replicaCount: 1
+    retention: "15d"
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "2Gi"
+    # 抓取间隔
+    scrapeInterval: 15s
+    # 告警规则评估间隔
+    evaluationInterval: 15s
+  # --- Grafana ---
+  grafana:
+    image: grafana/grafana:11.2.0
+    replicaCount: 1
+    adminUser: admin
+    adminPassword: "admin"  # 生产必改
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    # 暴露方式（ClusterIP 默认；生产建议 Ingress）
+    service:
+      type: ClusterIP
+      port: 3000
+  # --- Alertmanager ---
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    replicaCount: 1
+    persistence:
+      enabled: true
+      size: 2Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+    service:
+      type: ClusterIP
+      port: 9093
+    # 通知配置（YAML 多行字符串；空则只日志输出）
+    config: |
+      route:
+        receiver: "log-only"
+        group_by: ["alertname", "tenant"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+      receivers:
+        - name: "log-only"
+  # 告警规则（PrometheusRule）
+  alertRules:
+    # 高错误率：5 分钟内 HTTP 5xx 占比 > 10%
+    highErrorRate:
+      enabled: true
+      expr: |
+        sum(rate(super_agent_http_requests_total{status=~"5.."}[5m]))
+        /
+        sum(rate(super_agent_http_requests_total[5m]))
+        > 0.1
+      for: 5m
+      severity: critical
+      message: "HTTP 5xx 错误率超过 10%"
+    # LLM 调用失败：5 分钟内 LLM 错误调用率 > 5%
+    llmCallFailures:
+      enabled: true
+      expr: |
+        sum(rate(super_agent_llm_calls_total{status="error"}[5m]))
+        /
+        sum(rate(super_agent_llm_calls_total[5m]))
+        > 0.05
+      for: 5m
+      severity: warning
+      message: "LLM 调用失败率超过 5%"
+    # 工作流执行失败：5 分钟内 workflow error 率 > 10%
+    workflowFailures:
+      enabled: true
+      expr: |
+        sum(rate(super_agent_workflow_runs_total{status="error"}[5m]))
+        /
+        sum(rate(super_agent_workflow_runs_total[5m]))
+        > 0.1
+      for: 5m
+      severity: warning
+      message: "Workflow 执行失败率超过 10%"
+    # 高 P99 延迟：HTTP 请求 P99 > 5s
+    highLatency:
+      enabled: true
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(super_agent_http_request_duration_seconds_bucket[5m])) by (le)
+        ) > 5
+      for: 10m
+      severity: warning
+      message: "HTTP 请求 P99 延迟超过 5 秒"
+    # Token 用量飙升：1 小时内 token 用量 > 日配额 50%
+    tokenSpike:
+      enabled: false
+      expr: |
+        sum(rate(super_agent_llm_tokens_total[1h])) * 3600
+        > 50000
+      for: 15m
+      severity: warning
+      message: "1 小时内 token 用量超过 50000"

@@ -1,0 +1,168 @@
+{{/* V2.5-T12 OTel Collector：接收 OTLP trace，转发到 Prometheus exporter（供 Prometheus 抓取）。
+    - 接收：OTLP/HTTP 4318、OTLP/gRPC 4317
+    - 处理：batch（聚合 span 提高推送效率）
+    - 导出：prometheus exporter（端口 8889，暴露 metrics）+ debug（调试用）
+*/}}
+{{- if .Values.observability.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "super-agent.otelCollectorFullname" . }}-config
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+data:
+  relay.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+          grpc:
+            endpoint: 0.0.0.0:4317
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+      # 资源属性补充：注入 namespace/pod（来自 K8s downward API）
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: {{ .Release.Namespace | quote }}
+            action: upsert
+    exporters:
+      # Prometheus exporter：在 8889 暴露 metrics 供 Prometheus 抓取
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        namespace: super_agent
+        # 把 trace span 转为 exemplar（Prometheus 2.26+ 支持）
+        send_timestamps: true
+        metric_expiration: 180s
+        enable_open_metrics: true
+        resource_to_telemetry_conversion:
+          enabled: true
+      # 调试用：日志输出
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch, resource]
+          exporters: [prometheus, debug]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "super-agent.otelCollectorFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  type: ClusterIP
+  ports:
+    - name: otlp-http
+      port: {{ .Values.observability.otelCollector.ports.otlpHttp }}
+      targetPort: {{ .Values.observability.otelCollector.ports.otlpHttp }}
+      protocol: TCP
+    - name: otlp-grpc
+      port: {{ .Values.observability.otelCollector.ports.otlpGrpc }}
+      targetPort: {{ .Values.observability.otelCollector.ports.otlpGrpc }}
+      protocol: TCP
+    - name: prom-metrics
+      port: {{ .Values.observability.otelCollector.ports.promExporter }}
+      targetPort: {{ .Values.observability.otelCollector.ports.promExporter }}
+      protocol: TCP
+  selector:
+    {{- include "super-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "super-agent.otelCollectorFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  replicas: {{ .Values.observability.otelCollector.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "super-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: otel-collector
+  template:
+    metadata:
+      labels:
+        {{- include "super-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: otel-collector
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: otel-collector
+          image: {{ .Values.observability.otelCollector.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/otel/relay.yaml
+          ports:
+            - name: otlp-http
+              containerPort: {{ .Values.observability.otelCollector.ports.otlpHttp }}
+              protocol: TCP
+            - name: otlp-grpc
+              containerPort: {{ .Values.observability.otelCollector.ports.otlpGrpc }}
+              protocol: TCP
+            - name: prom-metrics
+              containerPort: {{ .Values.observability.otelCollector.ports.promExporter }}
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- with .Values.observability.otelCollector.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /
+              port: prom-metrics
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: prom-metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "super-agent.otelCollectorFullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

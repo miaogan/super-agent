@@ -1,0 +1,124 @@
+{{/* V2.5-T12 Alertmanager：接收 Prometheus 告警，按路由策略分发到通知渠道。
+    默认 receiver=log-only（只日志输出）；生产可在 values 中配置邮箱/Slack/PagerDuty。
+*/}}
+{{- if .Values.observability.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "super-agent.alertmanagerFullname" . }}-config
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alertmanager
+data:
+  alertmanager.yml: |
+{{ .Values.observability.alertmanager.config | indent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "super-agent.alertmanagerFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alertmanager
+spec:
+  type: {{ .Values.observability.alertmanager.service.type }}
+  ports:
+    - name: web
+      port: {{ .Values.observability.alertmanager.service.port }}
+      targetPort: 9093
+      protocol: TCP
+  selector:
+    {{- include "super-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: alertmanager
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "super-agent.alertmanagerFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alertmanager
+spec:
+  serviceName: {{ include "super-agent.alertmanagerFullname" . }}
+  replicas: {{ .Values.observability.alertmanager.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "super-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: alertmanager
+  template:
+    metadata:
+      labels:
+        {{- include "super-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: alertmanager
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: alertmanager
+          image: {{ .Values.observability.alertmanager.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+          ports:
+            - name: web
+              containerPort: 9093
+              protocol: TCP
+          {{- with .Values.observability.alertmanager.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+              readOnly: true
+            - name: storage
+              mountPath: /alertmanager
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: web
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: web
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "super-agent.alertmanagerFullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.observability.alertmanager.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.observability.alertmanager.persistence.size }}
+        {{- with .Values.observability.alertmanager.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+  {{- end }}
+{{- end }}

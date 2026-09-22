@@ -1,0 +1,217 @@
+{{/* V2.5-T12 Grafana：可视化看板，预置 datasource（Prometheus）+ dashboard。
+    - datasource: Prometheus（同命名空间 Service）
+    - dashboard: super-agent 总览（HTTP/LLM/Workflow/Token/Error）
+    - 持久化：SQLite 默认 DB（PVC）
+*/}}
+{{- if .Values.observability.enabled }}
+{{/* Grafana datasource Provisioning */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "super-agent.grafanaFullname" . }}-datasources
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  prometheus.yml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://{{ include "super-agent.prometheusFullname" . }}:9090
+        isDefault: true
+        editable: true
+---
+{{/* Grafana dashboard Provisioning：Super Agent 总览 */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "super-agent.grafanaFullname" . }}-dashboard
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  super-agent-overview.json: |
+    {
+      "annotations": {"list": []},
+      "title": "Super Agent Overview",
+      "uid": "super-agent-overview",
+      "schemaVersion": 39,
+      "version": 1,
+      "timezone": "browser",
+      "refresh": "10s",
+      "panels": [
+        {
+          "type": "stat", "title": "Total Requests", "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+          "targets": [{"expr": "sum(rate(super_agent_http_requests_total[5m]))", "legendFormat": "rps"}]
+        },
+        {
+          "type": "stat", "title": "5xx Error Rate", "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+          "targets": [{"expr": "sum(rate(super_agent_http_requests_total{status=~\"5..\"}[5m])) / sum(rate(super_agent_http_requests_total[5m]))", "legendFormat": "err%"}]
+        },
+        {
+          "type": "stat", "title": "LLM Calls/s", "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+          "targets": [{"expr": "sum(rate(super_agent_llm_calls_total[5m]))", "legendFormat": "calls/s"}]
+        },
+        {
+          "type": "stat", "title": "Tokens/s", "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+          "targets": [{"expr": "sum(rate(super_agent_llm_tokens_total[5m]))", "legendFormat": "tokens/s"}]
+        },
+        {
+          "type": "timeseries", "title": "HTTP Request Rate by Status", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+          "targets": [{"expr": "sum(rate(super_agent_http_requests_total[5m])) by (status)", "legendFormat": "{{ "{{status}}" }}"}]
+        },
+        {
+          "type": "timeseries", "title": "HTTP P95 Latency", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+          "targets": [{"expr": "histogram_quantile(0.95, sum(rate(super_agent_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95"}]
+        },
+        {
+          "type": "timeseries", "title": "LLM Tokens by Direction", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+          "targets": [{"expr": "sum(rate(super_agent_llm_tokens_total[5m])) by (direction)", "legendFormat": "{{ "{{direction}}" }}"}]
+        },
+        {
+          "type": "timeseries", "title": "Workflow Runs by Status", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+          "targets": [{"expr": "sum(rate(super_agent_workflow_runs_total[5m])) by (status)", "legendFormat": "{{ "{{status}}" }}"}]
+        },
+        {
+          "type": "timeseries", "title": "Errors by Type", "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+          "targets": [{"expr": "sum(rate(super_agent_errors_total[5m])) by (type)", "legendFormat": "{{ "{{type}}" }}"}]
+        }
+      ]
+    }
+---
+{{/* Grafana Service */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "super-agent.grafanaFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  type: {{ .Values.observability.grafana.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.observability.grafana.service.port }}
+      targetPort: 3000
+      protocol: TCP
+  selector:
+    {{- include "super-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "super-agent.grafanaFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: {{ .Values.observability.grafana.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "super-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: grafana
+  template:
+    metadata:
+      labels:
+        {{- include "super-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: grafana
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: grafana
+          image: {{ .Values.observability.grafana.image | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: {{ .Values.observability.grafana.adminUser | quote }}
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: {{ .Values.observability.grafana.adminPassword | quote }}
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_INSTALL_PLUGINS
+              value: ""
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          {{- with .Values.observability.grafana.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+              readOnly: true
+            - name: storage
+              mountPath: /var/lib/grafana
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: datasources
+          configMap:
+            name: {{ include "super-agent.grafanaFullname" . }}-datasources
+        - name: dashboards
+          configMap:
+            name: {{ include "super-agent.grafanaFullname" . }}-dashboard
+        - name: storage
+          {{- if .Values.observability.grafana.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "super-agent.grafanaFullname" . }}-storage
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+{{/* Grafana PVC（独立 PVC，Deployment 挂载） */}}
+{{- if .Values.observability.grafana.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "super-agent.grafanaFullname" . }}-storage
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.observability.grafana.persistence.size }}
+  {{- with .Values.observability.grafana.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end }}

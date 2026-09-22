@@ -1,0 +1,256 @@
+{{/* V2.5-T12 Prometheus：抓取 backend /metrics + otel-collector exporter，
+    存储 TSDB（PVC 持久化），评估告警规则，触发 Alertmanager。
+*/}}
+{{- if .Values.observability.enabled }}
+{{/* Prometheus 抓取配置 + 告警规则 ConfigMap */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "super-agent.prometheusFullname" . }}-config
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.observability.prometheus.scrapeInterval }}
+      evaluation_interval: {{ .Values.observability.prometheus.evaluationInterval }}
+      external_labels:
+        cluster: {{ .Release.Name | quote }}
+        namespace: {{ .Release.Namespace | quote }}
+
+    # 告警规则文件
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    # Alertmanager 对接
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+                - {{ include "super-agent.alertmanagerFullname" . }}:{{ .Values.observability.alertmanager.service.port }}
+
+    # 抓取目标
+    scrape_configs:
+      # backend 自身的 /metrics（PROMETHEUS_ENABLED=1 时暴露）
+      - job_name: "super-agent-backend"
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - {{ .Release.Namespace }}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            regex: super-agent
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+            action: keep
+            regex: backend
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+      # OTel Collector 暴露的 metrics（trace → metric）
+      - job_name: "otel-collector"
+        metrics_path: /metrics
+        static_configs:
+          - targets:
+              - {{ include "super-agent.otelCollectorFullname" . }}:{{ .Values.observability.otelCollector.ports.promExporter }}
+            labels:
+              component: otel-collector
+---
+{{/* 告警规则 */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "super-agent.prometheusFullname" . }}-rules
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+data:
+  super-agent.yml: |
+    groups:
+      - name: super-agent
+        rules:
+          {{- range $name, $rule := .Values.observability.alertRules }}
+          {{- if $rule.enabled }}
+          - alert: {{ printf "SuperAgent_%s" (camelcase $name | replace "-" "_") }}
+            expr: |
+{{ $rule.expr | indent 14 }}
+            for: {{ $rule.for }}
+            labels:
+              severity: {{ $rule.severity }}
+            annotations:
+              summary: {{ $rule.message | quote }}
+              description: {{ $rule.message | quote }}
+          {{- end }}
+          {{- end }}
+---
+{{/* Prometheus Service */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "super-agent.prometheusFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  type: ClusterIP
+  ports:
+    - name: web
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  selector:
+    {{- include "super-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+---
+{{/* Prometheus StatefulSet（持久化 TSDB） */}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "super-agent.prometheusFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  serviceName: {{ include "super-agent.prometheusFullname" . }}
+  replicas: {{ .Values.observability.prometheus.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "super-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: prometheus
+  template:
+    metadata:
+      labels:
+        {{- include "super-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: prometheus
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "super-agent.fullname" . }}-prometheus
+      containers:
+        - name: prometheus
+          image: {{ .Values.observability.prometheus.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ .Values.observability.prometheus.retention }}
+            - --web.enable-lifecycle
+            - --web.enable-admin-api
+          ports:
+            - name: web
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          {{- with .Values.observability.prometheus.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: rules
+              mountPath: /etc/prometheus/rules
+              readOnly: true
+            - name: storage
+              mountPath: /prometheus
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: web
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: web
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "super-agent.prometheusFullname" . }}-config
+        - name: rules
+          configMap:
+            name: {{ include "super-agent.prometheusFullname" . }}-rules
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.observability.prometheus.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.observability.prometheus.persistence.size }}
+        {{- with .Values.observability.prometheus.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+  {{- end }}
+---
+{{/* ServiceAccount + RBAC：Prometheus 抓取 K8s Pod 需要 list/watch */}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "super-agent.fullname" . }}-prometheus
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "super-agent.fullname" . }}-prometheus
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "super-agent.fullname" . }}-prometheus
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "super-agent.fullname" . }}-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "super-agent.fullname" . }}-prometheus
+    namespace: {{ .Release.Namespace }}
+{{- end }}

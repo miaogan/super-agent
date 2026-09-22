@@ -1,0 +1,17 @@
+{{/* Skills 目录 PVC：跨 Pod 共享 skills 文件（仅 enabled 时创建） */}}
+{{- if .Values.skillsPersistence.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "super-agent.fullname" . }}-skills
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteMany"]  # 多 Pod 同时挂载；需集群支持 RWX（如 NFS / CephFS）
+  {{- with .Values.skillsPersistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.skillsPersistence.size | quote }}
+{{- end -}}

@@ -130,6 +130,17 @@ export const useChatStore = defineStore('chat', () => {
             })
             loadMemories()
             break
+          case 'citation':
+            // V2.5-T5：retrieve_knowledge 返回，渲染引用块
+            addMessage({
+              role: 'citation',
+              content: '',
+              citations: e.data.citation,
+              contexts: e.data.contexts,
+              ragMode: e.data.mode,
+              ragError: e.data.error ?? null,
+            })
+            break
           case 'done':
             if (aiStarted && !aiBuf) {
               messages.value[messages.value.length - 1].content = e.data.content

@@ -1,0 +1,58 @@
+{{/* 非敏感配置集中到 ConfigMap，更新配置只需 rollout 重启 */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "super-agent.configMapFullname" . }}
+  labels:
+    {{- include "super-agent.labels" . | nindent 4 }}
+data:
+  # ===== LLM =====
+  MODEL: {{ .Values.config.model | quote }}
+  {{- with .Values.config.openaiBaseUrl }}
+  OPENAI_BASE_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.embeddingModel }}
+  EMBEDDING_MODEL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.embeddingBaseUrl }}
+  EMBEDDING_BASE_URL: {{ . | quote }}
+  {{- end }}
+  # ===== Sandbox =====
+  OPENSANDBOX_DOMAIN: {{ .Values.config.opensandboxDomain | quote }}
+  OPENSANDBOX_IMAGE: {{ .Values.config.opensandboxImage | quote }}
+  SANDBOX_MODE: {{ .Values.config.sandboxMode | quote }}
+  SKILLS_DIR: {{ .Values.config.skillsDir | quote }}
+  # ===== 会话 / 认证 =====
+  USER_ID: {{ .Values.config.userId | quote }}
+  JWT_ALGORITHM: {{ .Values.config.jwtAlgorithm | quote }}
+  JWT_EXPIRE_MINUTES: {{ .Values.config.jwtExpireMinutes | quote }}
+  CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  # ===== V2.5-T4 RAG =====
+  RAG_MODE: {{ .Values.config.ragMode | quote }}
+  {{- with .Values.config.ragBaseUrl }}
+  RAG_BASE_URL: {{ . | quote }}
+  {{- end }}
+  RAG_TOP_K: {{ .Values.config.ragTopK | quote }}
+  RAG_FAIL_OPEN: {{ .Values.config.ragFailOpen | quote }}
+  # ===== V2.5-T8 配额限流 =====
+  RATE_LIMIT_ENABLED: {{ .Values.config.rateLimitEnabled | quote }}
+  RATE_LIMIT_QPS: {{ .Values.config.rateLimitQps | quote }}
+  RATE_LIMIT_DAILY_TOKENS: {{ .Values.config.rateLimitDailyTokens | quote }}
+  RATE_LIMIT_DAILY_CALLS: {{ .Values.config.rateLimitDailyCalls | quote }}
+  {{- with .Values.config.rateLimitRedisUrl }}
+  RATE_LIMIT_REDIS_URL: {{ . | quote }}
+  {{- end }}
+  # ===== V2.5-T9 审计 =====
+  AUDIT_RETENTION_DAYS: {{ .Values.config.auditRetentionDays | quote }}
+  # ===== V2.5-T6 MCP =====
+  {{- with .Values.config.mcpServers }}
+  MCP_SERVERS: {{ . | quote }}
+  {{- end }}
+  # ===== V2.5-T12 OTel + Prometheus =====
+  OTEL_ENABLED: {{ .Values.config.otelEnabled | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.config.otelServiceName | quote }}
+  {{- with .Values.config.otelExporterOtlpEndpoint }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  OTEL_EXPORTER_OTLP_PROTOCOL: {{ .Values.config.otelExporterOtlpProtocol | quote }}
+  PROMETHEUS_ENABLED: {{ .Values.config.prometheusEnabled | quote }}

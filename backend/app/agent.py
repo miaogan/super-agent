@@ -16,6 +16,7 @@ from langchain_core.language_models import BaseChatModel
 from app.config import settings
 from app.memory import MemoryInjectionMiddleware, create_memory_tools
 from app.sandbox_backend import OpenSandboxBackend
+from app.workflow.rag import RETRIEVE_KNOWLEDGE_TOOL, create_retrieve_knowledge_tool
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ SYSTEM_PROMPT = """你是一个强大的深度智能体（Deep Agent），运行
   （Python 脚本、系统命令、pip 安装等），命令输出与退出码会完整返回。
 - **文件操作**：`ls` / `read_file` / `write_file` / `edit_file` / `glob` / `grep`
   直接作用于沙箱文件系统。
+- **知识检索（RAG）**：用户问到项目文档/产品手册/内部知识/外部资料时，
+  先用 `retrieve_knowledge` 工具检索权威来源，基于返回的 contexts 回答，
+  并在回答中标注引用来源（[1] 文档标题·页码）。
 - **子代理**：复杂任务用 `task` 工具派发子代理（{subagent_names}）分工处理，
   多个独立子任务可分别派发给不同子代理。
 - **任务规划**：多步骤任务先用 `write_todos` 制定计划，随进展更新。
@@ -37,8 +41,10 @@ SYSTEM_PROMPT = """你是一个强大的深度智能体（Deep Agent），运行
 1. 涉及代码/数据处理的任务：先写文件（write_file），再执行（execute）验证，
    把真实运行结果反馈给用户，不要凭空猜测输出。
 2. 长期信息（用户偏好、项目背景、关键决定）主动调用 `manage_memory` 保存。
-3. 用户提到的事实与本会话历史冲突时，以最近一次说明为准。
-4. 回答使用用户的语言（中文问题用中文回答）。
+3. 涉及外部资料/文档的问题：先 `retrieve_knowledge` 检索，再基于真实结果回答，
+   不要凭空编造；回答末尾用引用编号标注来源（如 [1]、[2]）。
+4. 用户提到的事实与本会话历史冲突时，以最近一次说明为准。
+5. 回答使用用户的语言（中文问题用中文回答）。
 """
 
 SUBAGENTS = [
@@ -120,6 +126,8 @@ def build_agent(
     skills_dirs: list[str] | None = None,
     subagents: list[dict] | None = None,
     system_prompt: str | None = None,
+    tenant_id: str | None = None,
+    enable_rag: bool = True,
 ):
     """组装 deep agent。
 
@@ -136,9 +144,15 @@ def build_agent(
             工具由 LLM 自主派发（与 ``SubagentOrchestrator`` 的确定性串行互补）。
         system_prompt: V2 覆盖系统提示（来自 CompiledConfig.system_prompt）；
             None 时用内置 ``SYSTEM_PROMPT``。
+        tenant_id: V2.5-T5 租户 id（用于 RAG 多租户隔离注入 retrieve_knowledge 工具）。
+        enable_rag: V2.5-T5 是否注入 ``retrieve_knowledge`` 工具（默认 True）；
+            设为 False 可在测试或无 RAG 场景下禁用。
     """
     user_id = user_id or settings.user_id
     tools = create_memory_tools(user_id, store) if store is not None else []
+    # V2.5-T5：注入 retrieve_knowledge 工具（按 tenant_id 隔离检索）
+    if enable_rag:
+        tools = [*tools, create_retrieve_knowledge_tool(tenant_id=tenant_id)]
     kwargs: dict = dict(
         model=model or load_model(),
         system_prompt=system_prompt or SYSTEM_PROMPT,

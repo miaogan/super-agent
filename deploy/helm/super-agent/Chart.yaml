@@ -1,0 +1,22 @@
+apiVersion: v2
+name: super-agent
+description: |
+  基于 LangChain deepagents + OpenSandbox + PostgreSQL 的深度智能体平台
+  （多轮对话 / 长期记忆 / 沙箱执行 / 多租户 / Workflow 编排）。
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ai-agent
+  - deepagents
+  - langchain
+  - llm
+  - rag
+  - mcp
+home: https://github.com/your-org/super-agent
+sources:
+  - https://github.com/your-org/super-agent
+maintainers:
+  - name: super-agent team
+    email: dev@example.com
+dependencies: []

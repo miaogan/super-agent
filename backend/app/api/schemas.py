@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.workflow.release import DEFAULT_STICKY_TTL
+
 
 class ChatRequest(BaseModel):
     """POST /api/chat 请求体。"""
@@ -288,6 +290,40 @@ class OrchestratorRunResponse(BaseModel):
     error: str | None = None
 
 
+# ===== V2.5-T3：并行子代理 =====
+
+
+class ParallelRunRequest(BaseModel):
+    """POST /api/v2/workflows/{id}/orchestrate-parallel 请求体。"""
+
+    task: str = Field(..., min_length=1)
+    strategy: str = Field(
+        "all", description="合并策略：first / all / merge"
+    )
+    min_success: int = Field(1, ge=1, description="最少成功数（quorum）")
+    timeout_seconds: float | None = Field(None, description="整体超时（秒）")
+    separator: str = "\n---\n"
+    context: dict | None = None
+
+
+class ParallelStepItem(BaseModel):
+    agent: str
+    output: str
+    ok: bool
+    error: str | None = None
+    elapsed_ms: int = 0
+
+
+class ParallelRunResponse(BaseModel):
+    steps: list[ParallelStepItem]
+    final_output: str
+    strategy: str
+    success_count: int
+    failure_count: int
+    elapsed_ms: int
+    error: str | None = None
+
+
 # ===== V2-T8：评测面板 =====
 
 
@@ -436,3 +472,339 @@ class PromptDiffResponse(BaseModel):
     to_content: str
     added_lines: list[str]
     removed_lines: list[str]
+
+
+# ---------------------------------------------------------------------- #
+# V2.5-T2 人机协同（HIL）schemas
+# ---------------------------------------------------------------------- #
+
+
+class InterruptItem(BaseModel):
+    """审批任务条目（列表/详情通用）。"""
+
+    id: str
+    tenant_id: str
+    thread_id: str
+    workflow_id: str | None = None
+    node_id: str = ""
+    message: str = ""
+    payload: dict = Field(default_factory=dict)
+    assignee: str | None = None
+    timeout_seconds: int = 24 * 60 * 60
+    status: str = "pending"
+    decision: str | None = None
+    decision_comment: str = ""
+    decided_by: str | None = None
+    created_at: str
+    decided_at: str | None = None
+    expires_at: str
+
+
+class InterruptListResponse(BaseModel):
+    items: list[InterruptItem]
+
+
+class InterruptResumeRequest(BaseModel):
+    """POST /api/v2/hil/{interrupt_id}/resume 请求体。"""
+
+    decision: str = Field(..., description="approve / reject / cancel")
+    comment: str = ""
+    decided_by: str | None = Field(None, description="审批人 user_id（assignee 非空时必须匹配）")
+
+
+class InterruptResumeResponse(BaseModel):
+    """决策后返回：更新后的 interrupt + LangGraph resume value。"""
+
+    interrupt: InterruptItem
+    resume_value: bool | dict
+
+
+class InterruptCreateRequest(BaseModel):
+    """测试用：手动创建一个 interrupt（绕过 LangGraph，便于联调）。"""
+
+    thread_id: str
+    node_id: str = ""
+    message: str = ""
+    payload: dict = Field(default_factory=dict)
+    assignee: str | None = None
+    timeout_seconds: int = 24 * 60 * 60
+    workflow_id: str | None = None
+
+
+# ---------------------------------------------------------------------- #
+# V2.5-T9 审计日志 schemas
+# ---------------------------------------------------------------------- #
+
+
+class AuditEventItem(BaseModel):
+    """审计事件条目。"""
+
+    id: str
+    tenant_id: str
+    category: str = "operation"
+    actor: str = "system"
+    action: str = ""
+    resource_type: str = ""
+    resource_id: str | None = None
+    result: str = "success"
+    detail: dict = Field(default_factory=dict)
+    ip: str | None = None
+    user_agent: str | None = None
+    created_at: str
+
+
+class AuditListResponse(BaseModel):
+    items: list[AuditEventItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class AuditLogRequest(BaseModel):
+    """手动写一条审计（联调用）。"""
+
+    action: str
+    category: str = "operation"
+    resource_type: str = ""
+    resource_id: str | None = None
+    result: str = "success"
+    detail: dict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------- #
+# V2.5-T6 MCP 协议支持 schemas
+# ---------------------------------------------------------------------- #
+
+
+class MCPServerConfigRequest(BaseModel):
+    """POST /api/v2/mcp/servers 请求体（运行时注册 MCP server）。"""
+
+    name: str = Field(..., min_length=1, max_length=64)
+    transport: str = Field("stdio", description="stdio | http")
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    url: str = ""
+    env: dict[str, str] = Field(default_factory=dict)
+    allowed_tools: list[str] | None = None
+    denied_tools: list[str] = Field(default_factory=list)
+    call_timeout: float = 30.0
+    connect_timeout: float = 10.0
+
+
+class MCPServerItem(BaseModel):
+    name: str
+    transport: str
+    command: str = ""
+    url: str = ""
+    enabled: bool = True
+    connected: bool = False
+
+
+class MCPServerListResponse(BaseModel):
+    items: list[MCPServerItem]
+
+
+class MCPToolItem(BaseModel):
+    name: str
+    namespaced_name: str
+    description: str = ""
+    server: str
+    allowed: bool = True
+
+
+class MCPToolListResponse(BaseModel):
+    items: list[MCPToolItem]
+
+
+class MCPConnectResponse(BaseModel):
+    """POST /api/v2/mcp/servers/{name}/connect 响应。"""
+
+    name: str
+    connected: bool
+    error: str | None = None
+
+
+class MCPToolCallRequest(BaseModel):
+    """POST /api/v2/mcp/tools/{namespaced_name}/invoke 请求体。"""
+
+    arguments: dict = Field(default_factory=dict)
+
+
+class MCPToolCallResponse(BaseModel):
+    tool: str
+    result: str
+    elapsed_ms: int
+    error: str | None = None
+
+
+# ---------------------------------------------------------------------- #
+# V2.5-T7 工具市场骨架 schemas
+# ---------------------------------------------------------------------- #
+
+
+class PluginManifestRequest(BaseModel):
+    """POST /api/v2/plugins/install 请求体（manifest JSON）。
+
+    - ``name`` / ``version``：必填，唯一标识 + 语义版本
+    - ``type``：mcp / skill / builtin（默认 mcp）
+    - ``source``：类型相关配置（mcp 是 server 配置；skill 是 dir/url；builtin 是 tool 名）
+    - ``permissions``：声明所需权限（必须 ⊆ KNOWN_PERMISSIONS）
+    - ``require_approval``：是否强制人工审批（高风险权限默认 True）
+    - ``approved``：调用方已通过审批（绕过 require_approval）
+    - ``description`` / ``author`` / ``config``：透传元数据
+    """
+
+    name: str = Field(..., min_length=1, max_length=128)
+    version: str = Field("0.0.0")
+    description: str = ""
+    author: str = ""
+    type: str = Field("mcp", description="mcp | skill | builtin")
+    source: dict = Field(default_factory=dict)
+    permissions: list[str] = Field(default_factory=list)
+    require_approval: bool = False
+    approved: bool = False
+    config: dict = Field(default_factory=dict)
+
+
+class PluginItem(BaseModel):
+    """插件详情（GET / POST 响应）。"""
+
+    id: str
+    tenant_id: str
+    name: str
+    version: str
+    description: str = ""
+    author: str = ""
+    type: str = "mcp"
+    source: dict = Field(default_factory=dict)
+    permissions: list[str] = Field(default_factory=list)
+    manifest: dict = Field(default_factory=dict)
+    checksum: str = ""
+    status: str = "installed"
+    installed_by: str = ""
+    installed_at: str = ""
+    updated_at: str = ""
+
+
+class PluginListResponse(BaseModel):
+    items: list[PluginItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class PluginValidateResponse(BaseModel):
+    """POST /api/v2/plugins/validate 响应（只校验不安装）。"""
+
+    valid: bool
+    name: str
+    version: str
+    type: str
+    permissions: list[str] = Field(default_factory=list)
+    require_approval: bool = False
+    checksum: str = ""
+    error: str | None = None
+
+
+# ---------------------------------------------------------------------- #
+# V2.5-T10 API Key 轮转 + 灰度发布 schemas
+# ---------------------------------------------------------------------- #
+
+
+class ApiKeyCreateRequest(BaseModel):
+    """POST /api/v2/apikeys 请求体。"""
+
+    name: str = Field("default", max_length=128)
+    expires_in_days: int | None = Field(
+        None, ge=1, le=3650, description="过期天数（None=永久）"
+    )
+
+
+class ApiKeyItem(BaseModel):
+    """API Key 列表 / 详情项（不返回明文 key）。"""
+
+    id: str
+    tenant_id: str
+    name: str
+    prefix: str
+    status: str = "active"
+    expires_at: str | None = None
+    last_used_at: str | None = None
+    rotated_from: str | None = None
+    created_by: str = ""
+    created_at: str
+    updated_at: str
+
+
+class ApiKeyCreateResponse(BaseModel):
+    """创建 / 轮转后返回明文 key（仅此一次）。"""
+
+    api_key: str
+    item: ApiKeyItem
+
+
+class ApiKeyListResponse(BaseModel):
+    items: list[ApiKeyItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class ApiKeyRotateResponse(BaseModel):
+    """轮转：旧 key 切 rotated，新 key active；明文 key 仅此一次。"""
+
+    old: ApiKeyItem
+    new: ApiKeyCreateResponse
+
+
+class ReleaseCreateRequest(BaseModel):
+    """POST /api/v2/workflows/{id}/releases 请求体。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    weights: dict[str, int] = Field(..., description='{"v1": 90, "v2": 10}，权重总和 100')
+    status: str = Field("draft", description="draft | active | paused | archived")
+    sticky_session: bool = False
+    sticky_ttl_seconds: int = Field(DEFAULT_STICKY_TTL, ge=0, le=86400 * 30)
+
+
+class ReleaseUpdateWeightsRequest(BaseModel):
+    weights: dict[str, int]
+
+
+class ReleaseItem(BaseModel):
+    id: str
+    tenant_id: str
+    workflow_id: str
+    name: str
+    weights: dict = Field(default_factory=dict)
+    status: str = "draft"
+    sticky_session: bool = False
+    sticky_ttl_seconds: int = DEFAULT_STICKY_TTL
+    created_by: str = ""
+    created_at: str
+    updated_at: str
+    activated_at: str | None = None
+
+
+class ReleaseListResponse(BaseModel):
+    items: list[ReleaseItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class ReleaseSelectRequest(BaseModel):
+    """POST /api/v2/workflows/{id}/releases/select 测试用：模拟流量切分。"""
+
+    sticky_key: str | None = None
+    count: int = Field(1000, ge=1, le=10000)
+
+
+class ReleaseSelectResponse(BaseModel):
+    """流量切分模拟结果。"""
+
+    workflow_id: str
+    release_id: str | None
+    weights: dict = Field(default_factory=dict)
+    distribution: dict[str, int] = Field(default_factory=dict)
+    sticky_session: bool = False
