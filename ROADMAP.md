@@ -196,6 +196,33 @@
 
 **测试结果**：326 passed, 2 skipped（无 PG 时集成测试自动跳过）
 
+## V2.5 体验改进（P1-P4）
+
+> 体验后基于用户反馈的快速修补，不另立版本号，并入 V2.5 收尾。
+
+| 任务 | 目标 | 状态 |
+|---|---|---|
+| **P1** 沙箱生命周期 | 初始化时创建沙箱（消除首次对话冷启动）+ 30 分钟自毁 + 每次对话续期 15 分钟（`renewal_seconds` 配置） | ✅ |
+| **P2** Workflow 运行页签 | 专门运行 workflow 的页签：选 workflow → 输入测试任务 → 切 sequential/parallel → 展示结果 + 历史记录 | ✅ |
+| **P3** Skill 压缩包上传 | 支持上传 zip 压缩包注册复杂 skill（含多文件 + 安全校验：路径/扩展名/大小/数量白名单） | ✅ |
+| **P4** 子代理管理页签 | 用户自定义子代理（CRUD + Fork 内置）+ 一键复用到 workflow subagent 节点；左下角冗余页签精简 | ✅ |
+
+### P1-P4 关键实现
+
+- `app/api/sandbox_registry.py`：`start()` 预热 shared 沙箱；`acquire()` 续期 `expires_at`；`_reaper()` 按 `expires_at` 自毁
+- `frontend/src/components/workflow/WorkflowRunner.vue`：独立运行页签
+- `backend/app/skill_loader.py::register_skill_archive` + `POST /api/v1/skills/upload-archive`：zip 安全解压注册
+- `backend/app/models.py::SubAgent` + `POST/GET/PUT/DELETE /api/v2/subagents` + `POST /api/v2/subagents/{id}/fork`：子代理 CRUD + 内置镜像同步 + Fork
+- `frontend/src/components/SubAgentManager.vue` + `frontend/src/stores/subagents.ts`：管理页签 + 复用 store
+- `frontend/src/components/Sidebar.vue`：去除底部冗余 view-switch，子代理卡片改为跳转入口
+
+### P1-P4 测试覆盖
+
+| 测试文件 | 覆盖范围 | 依赖 |
+|---|---|---|
+| `test_v2_sandbox_registry.py` | 沙箱预热 / 续期 / 自毁 / shared 复用 | 无 |
+| `test_v25_subagents.py` | SubAgent ORM 表结构 + 唯一索引 + CRUD + Fork + 租户隔离 + tools 序列化 | 无 |
+
 ## V2.5 关键设计决策
 
 - **条件分支用表达式求值器**（如 `eval_ex`），不引入完整 DSL，保持编译器简单

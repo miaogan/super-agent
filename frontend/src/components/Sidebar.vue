@@ -1,19 +1,59 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useChatStore } from '@/stores/chat'
+import { useSubAgentsStore } from '@/stores/subagents'
 import * as api from '@/api'
 
-type View = 'chat' | 'workflow'
+type View = 'chat' | 'workflow' | 'run' | 'agents'
 const props = defineProps<{ view?: View }>()
 const emit = defineEmits<{ switchView: [View] }>()
 
 const chat = useChatStore()
+const subagents = useSubAgentsStore()
 
 // Skill 上传表单
 const showSkillForm = ref(false)
 const skillName = ref('')
 const skillDesc = ref('')
 const skillContent = ref('')
+// 压缩包上传
+const archiveFile = ref<File | null>(null)
+const uploadingArchive = ref(false)
+
+function onArchiveChange(e: Event) {
+  const target = e.target as HTMLInputElement
+  if (target.files && target.files[0]) {
+    archiveFile.value = target.files[0]
+  }
+}
+
+async function onUploadArchive() {
+  if (!archiveFile.value) {
+    alert('请选择 zip 文件')
+    return
+  }
+  if (!skillName.value) {
+    alert('请填写 skill 名称')
+    return
+  }
+  uploadingArchive.value = true
+  try {
+    await api.uploadSkillArchive(
+      skillName.value,
+      skillDesc.value,
+      archiveFile.value,
+    )
+    archiveFile.value = null
+    skillName.value = ''
+    skillDesc.value = ''
+    chat.loadSkills()
+    alert('压缩包上传成功')
+  } catch (e) {
+    alert((e as Error).message)
+  } finally {
+    uploadingArchive.value = false
+  }
+}
 
 async function onAddSkill() {
   if (!skillName.value || !skillContent.value) {
@@ -56,10 +96,10 @@ async function onDeleteMemory(key: string) {
 const memInput = ref('')
 
 onMounted(() => {
-  chat.loadAgents()
   chat.loadSkills()
   chat.loadMemories()
   chat.loadSessions()
+  subagents.load()
 })
 </script>
 
@@ -73,13 +113,16 @@ onMounted(() => {
       </div>
     </div>
 
-    <div class="card">
-      <h3>子代理</h3>
-      <div v-if="chat.subagents.length === 0" class="empty">加载中…</div>
-      <div v-for="s in chat.subagents" :key="s.name" class="item">
+    <div class="card clickable" @click="emit('switchView', 'agents')">
+      <h3>子代理（{{ subagents.items.length }}）</h3>
+      <div v-if="subagents.items.length === 0" class="empty">点击管理 →</div>
+      <div v-for="s in subagents.items.slice(0, 5)" :key="s.id" class="item">
+        <span class="badge" :class="{ custom: !s.is_builtin }">
+          {{ s.is_builtin ? '内置' : '自定义' }}
+        </span>
         <span class="name">{{ s.name }}</span>
-        <span class="desc"> · {{ s.description }}</span>
       </div>
+      <div class="hint-link">管理 / Fork / 复用到 workflow →</div>
     </div>
 
     <div class="card">
@@ -97,14 +140,38 @@ onMounted(() => {
       </div>
       <details>
         <summary @click="showSkillForm = !showSkillForm">上传 Skill</summary>
-        <textarea
-          v-model="skillContent"
-          placeholder="Skill 内容（Markdown）"
-          class="skill-input"
-        />
-        <input v-model="skillName" placeholder="skill 名称" class="skill-input" />
-        <input v-model="skillDesc" placeholder="一句话描述" class="skill-input" />
-        <button class="full-btn" @click="onAddSkill">上传</button>
+        <!-- 单文件模式 -->
+        <div class="upload-section">
+          <div class="upload-label">单文件 Skill</div>
+          <textarea
+            v-model="skillContent"
+            placeholder="Skill 内容（Markdown）"
+            class="skill-input"
+          />
+          <input v-model="skillName" placeholder="skill 名称" class="skill-input" />
+          <input v-model="skillDesc" placeholder="一句话描述" class="skill-input" />
+          <button class="full-btn" @click="onAddSkill">上传单文件</button>
+        </div>
+        <!-- 压缩包模式 -->
+        <div class="upload-section">
+          <div class="upload-label">压缩包 Skill（多文件）</div>
+          <input v-model="skillName" placeholder="skill 名称" class="skill-input" />
+          <input v-model="skillDesc" placeholder="一句话描述" class="skill-input" />
+          <input
+            type="file"
+            accept=".zip"
+            class="skill-input"
+            @change="onArchiveChange"
+          />
+          <button
+            class="full-btn"
+            :disabled="uploadingArchive"
+            @click="onUploadArchive"
+          >
+            {{ uploadingArchive ? '上传中…' : '上传压缩包' }}
+          </button>
+          <div class="hint">zip 必须含 SKILL.md，可含脚本/资源</div>
+        </div>
       </details>
     </div>
 
@@ -148,23 +215,6 @@ onMounted(() => {
         销毁沙箱
       </button>
     </div>
-
-    <div class="row view-switch">
-      <button
-        class="ghost"
-        :class="{ on: props.view === 'chat' }"
-        @click="emit('switchView', 'chat')"
-      >
-        对话
-      </button>
-      <button
-        class="ghost"
-        :class="{ on: props.view === 'workflow' }"
-        @click="emit('switchView', 'workflow')"
-      >
-        画布
-      </button>
-    </div>
   </aside>
 </template>
 
@@ -197,6 +247,19 @@ h1 {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 12px;
+}
+.card.clickable {
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.card.clickable:hover {
+  border-color: var(--accent);
+}
+.hint-link {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--accent);
+  text-align: right;
 }
 h3 {
   font-size: 13px;
@@ -273,6 +336,23 @@ summary {
   font-size: 12px;
   width: 100%;
 }
+.upload-section {
+  margin-top: 8px;
+  padding: 6px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+.upload-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.hint {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 4px;
+}
 .row {
   display: flex;
   gap: 8px;
@@ -295,8 +375,4 @@ summary {
   padding: 6px 10px;
   font-size: 12px;
 }
-.view-switch button.on {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
-}</style>
+</style>

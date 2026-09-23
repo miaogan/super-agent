@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
@@ -110,6 +111,10 @@ from app.api.schemas import (
     SkillCreateRequest,
     SkillItem,
     SkillListResponse,
+    SubAgentCreateRequest,
+    SubAgentItem,
+    SubAgentListResponse,
+    SubAgentUpdateRequest,
     TestCaseCreateRequest,
     TestCaseItem,
     TestCaseListResponse,
@@ -144,6 +149,7 @@ from app.models import (
     Message,
     Prompt as PromptModel,
     Session as SessionModel,
+    SubAgent as SubAgentModel,
     TestCase as TestCaseModel,
     TestRun as TestRunModel,
     ToolPlugin as ToolPluginModel,
@@ -1180,6 +1186,272 @@ def create_app(
                 if row is not None:
                     await session.delete(row)
         return {"deleted": name}
+
+    # ------------------------------------------------------------------ #
+    # V1：压缩包上传 skill（支持多文件复杂 skill）
+    # ------------------------------------------------------------------ #
+
+    @app.post("/api/v1/skills/upload-archive")
+    async def skills_upload_archive(
+        name: str = Form(...),
+        description: str = Form(""),
+        file: UploadFile = File(...),
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> dict:
+        """上传 zip 压缩包注册复杂 skill（含多文件）。
+
+        压缩包必须包含 SKILL.md，可含辅助脚本/资源文件。
+        """
+        from app.skill_loader import register_skill_archive
+
+        # 读取压缩包内容
+        archive_bytes = await file.read()
+        if not archive_bytes:
+            raise HTTPException(status_code=400, detail="empty file")
+        # 限制上传大小 50MB
+        if len(archive_bytes) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="file too large (max 50MB)")
+        try:
+            result = register_skill_archive(
+                tenant_id=ctx.tenant_id,
+                name=name,
+                archive_bytes=archive_bytes,
+                description=description,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # 写 DB 元数据快照
+        factory = get_session_factory()
+        async with factory() as session:
+            async with session.begin():
+                from app.models import Skill as SkillModel
+
+                old = (
+                    await session.execute(
+                        select(SkillModel).where(
+                            SkillModel.tenant_id == ctx.tenant_id,
+                            SkillModel.name == name,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if old is not None:
+                    await session.delete(old)
+                session.add(
+                    SkillModel(
+                        tenant_id=ctx.tenant_id,
+                        name=name,
+                        description=description,
+                        content=f"[archive skill: {len(result['files'])} files]",
+                        is_global=False,
+                    )
+                )
+        return result
+
+    # ------------------------------------------------------------------ #
+    # V2.5：子代理管理（CRUD + 内置镜像同步）
+    # ------------------------------------------------------------------ #
+
+    def _subagent_to_item(row: SubAgentModel) -> SubAgentItem:
+        return SubAgentItem(
+            id=row.id,
+            name=row.name,
+            description=row.description,
+            system_prompt=row.system_prompt,
+            model=row.model,
+            tools=[t for t in row.tools.split(",") if t] if row.tools else [],
+            is_builtin=row.is_builtin,
+            created_at=row.created_at.isoformat(),
+            updated_at=row.updated_at.isoformat(),
+        )
+
+    @app.get("/api/v2/subagents", response_model=SubAgentListResponse)
+    async def subagents_list(
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> SubAgentListResponse:
+        """列出当前租户的全部子代理（含内置镜像 + 自定义）。
+
+        首次访问时自动把内置 SUBAGENTS 同步为镜像行（``is_builtin=True``），
+        方便用户在内置基础上 fork 修改，且供 workflow 节点直接按名引用。
+        """
+        # 同步内置镜像（仅对尚未落库的内置 name 插入）
+        existing = (
+            await db.execute(
+                select(SubAgentModel).where(
+                    SubAgentModel.tenant_id == ctx.tenant_id,
+                    SubAgentModel.is_builtin.is_(True),
+                )
+            )
+        ).scalars().all()
+        existing_names = {r.name for r in existing}
+        to_seed = [
+            SubAgentModel(
+                tenant_id=ctx.tenant_id,
+                name=s["name"],
+                description=s["description"],
+                system_prompt=s["system_prompt"],
+                model="",
+                tools="",
+                is_builtin=True,
+            )
+            for s in SUBAGENTS
+            if s["name"] not in existing_names
+        ]
+        if to_seed:
+            db.add_all(to_seed)
+            await db.flush()
+        res = await db.execute(
+            select(SubAgentModel)
+            .where(SubAgentModel.tenant_id == ctx.tenant_id)
+            .order_by(SubAgentModel.is_builtin.desc(), SubAgentModel.name.asc())
+        )
+        rows = res.scalars().all()
+        await db.commit()
+        return SubAgentListResponse(items=[_subagent_to_item(r) for r in rows])
+
+    @app.post("/api/v2/subagents", response_model=SubAgentItem, status_code=201)
+    async def subagents_create(
+        body: SubAgentCreateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> SubAgentItem:
+        # tenant + name 唯一约束；冲突时 409
+        conflict = (
+            await db.execute(
+                select(SubAgentModel).where(
+                    SubAgentModel.tenant_id == ctx.tenant_id,
+                    SubAgentModel.name == body.name,
+                )
+            )
+        ).scalar_one_or_none()
+        if conflict is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"subagent name '{body.name}' already exists",
+            )
+        row = SubAgentModel(
+            tenant_id=ctx.tenant_id,
+            name=body.name,
+            description=body.description,
+            system_prompt=body.system_prompt,
+            model=body.model,
+            tools=",".join(body.tools),
+            is_builtin=False,
+        )
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+        return _subagent_to_item(row)
+
+    @app.put("/api/v2/subagents/{subagent_id}", response_model=SubAgentItem)
+    async def subagents_update(
+        subagent_id: str,
+        body: SubAgentUpdateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> SubAgentItem:
+        row = (
+            await db.execute(
+                select(SubAgentModel).where(
+                    SubAgentModel.tenant_id == ctx.tenant_id,
+                    SubAgentModel.id == subagent_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="subagent not found")
+        # 若改 name，需保证新名不冲突
+        if body.name is not None and body.name != row.name:
+            dup = (
+                await db.execute(
+                    select(SubAgentModel).where(
+                        SubAgentModel.tenant_id == ctx.tenant_id,
+                        SubAgentModel.name == body.name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if dup is not None and dup.id != row.id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"subagent name '{body.name}' already exists",
+                )
+        for field, value in body.model_dump(exclude_unset=True).items():
+            if field == "tools":
+                row.tools = ",".join(value or [])
+            else:
+                setattr(row, field, value)
+        await db.commit()
+        await db.refresh(row)
+        return _subagent_to_item(row)
+
+    @app.delete("/api/v2/subagents/{subagent_id}")
+    async def subagents_delete(
+        subagent_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        row = (
+            await db.execute(
+                select(SubAgentModel).where(
+                    SubAgentModel.tenant_id == ctx.tenant_id,
+                    SubAgentModel.id == subagent_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="subagent not found")
+        await db.delete(row)
+        await db.commit()
+        return {"deleted": subagent_id}
+
+    @app.post("/api/v2/subagents/{subagent_id}/fork", response_model=SubAgentItem)
+    async def subagents_fork(
+        subagent_id: str,
+        new_name: str = Query(..., min_length=1, max_length=128),
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> SubAgentItem:
+        """基于现有子代理（含内置）fork 出一份自定义副本。
+
+        用于在内置 SUBAGENTS 基础上 fork 修改而不影响原定义。
+        """
+        src = (
+            await db.execute(
+                select(SubAgentModel).where(
+                    SubAgentModel.tenant_id == ctx.tenant_id,
+                    SubAgentModel.id == subagent_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if src is None:
+            raise HTTPException(status_code=404, detail="subagent not found")
+        conflict = (
+            await db.execute(
+                select(SubAgentModel).where(
+                    SubAgentModel.tenant_id == ctx.tenant_id,
+                    SubAgentModel.name == new_name,
+                )
+            )
+        ).scalar_one_or_none()
+        if conflict is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"subagent name '{new_name}' already exists",
+            )
+        row = SubAgentModel(
+            tenant_id=ctx.tenant_id,
+            name=new_name,
+            description=src.description,
+            system_prompt=src.system_prompt,
+            model=src.model,
+            tools=src.tools,
+            is_builtin=False,
+        )
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+        return _subagent_to_item(row)
 
     # ------------------------------------------------------------------ #
     # V1：会话列表 + 会话内消息历史（按 tenant 隔离）

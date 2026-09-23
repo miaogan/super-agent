@@ -44,6 +44,40 @@ export interface AgentsResponse {
   subagents: AgentInfo[]
 }
 
+// ===== V2.5：子代理管理 =====
+
+export interface SubAgentItem {
+  id: string
+  name: string
+  description: string
+  system_prompt: string
+  model: string
+  tools: string[]
+  is_builtin: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface SubAgentListResponse {
+  items: SubAgentItem[]
+}
+
+export interface SubAgentCreateRequest {
+  name: string
+  description?: string
+  system_prompt?: string
+  model?: string
+  tools?: string[]
+}
+
+export interface SubAgentUpdateRequest {
+  name?: string
+  description?: string
+  system_prompt?: string
+  model?: string
+  tools?: string[]
+}
+
 export interface SkillItem {
   name: string
   description: string

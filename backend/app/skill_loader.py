@@ -234,3 +234,145 @@ def delete_skill(tenant_id: str, name: str) -> bool:
 
     shutil.rmtree(skill_dir)
     return True
+
+
+# ---------------------------------------------------------------------- #
+# 压缩包上传（复杂 skill：含辅助脚本/资源文件/多文件）
+# ---------------------------------------------------------------------- #
+
+#: 压缩包内允许的文件扩展名白名单（防止上传可执行恶意文件）
+_ARCHIVE_ALLOWED_EXT = {
+    ".md", ".txt", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
+    ".html", ".css", ".sql", ".sh", ".csv", ".xml", ".toml", ".ini",
+    ".cfg", ".conf", ".rst", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+}
+
+#: 压缩包解压后最大文件数
+_ARCHIVE_MAX_FILES = 200
+#: 单文件最大 10MB
+_ARCHIVE_MAX_FILE_SIZE = 10 * 1024 * 1024
+#: 解压后总大小最大 50MB
+_ARCHIVE_MAX_TOTAL_SIZE = 50 * 1024 * 1024
+
+
+def register_skill_archive(
+    tenant_id: str,
+    name: str,
+    archive_bytes: bytes,
+    description: str = "",
+) -> dict:
+    """从 zip 压缩包注册复杂 skill（含多文件）。
+
+    压缩包结构要求：
+    - 必须包含 ``SKILL.md``（根目录或一级子目录）
+    - 可包含辅助脚本、资源文件等（扩展名白名单限制）
+
+    安全约束：
+    - 文件名禁止 ``..`` / 绝对路径 / 符号链接
+    - 扩展名白名单过滤
+    - 文件数/大小限制
+
+    Returns:
+        dict: ``{"name", "description", "files", "skill_file"}``
+    """
+    import io
+    import zipfile
+
+    if not _TENANT_ID_RE.match(tenant_id):
+        raise ValueError(f"invalid tenant_id: {tenant_id}")
+    if not _SKILL_NAME_RE.match(name):
+        raise ValueError(f"invalid skill name: {name}")
+
+    # 解压到内存，先校验再落盘
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(archive_bytes))
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"invalid zip file: {exc}") from exc
+
+    entries: list[tuple[str, bytes]] = []
+    total_size = 0
+    has_skill_md = False
+
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        fname = info.filename
+        # 安全校验：禁止绝对路径 / .. / 符号链接
+        if fname.startswith("/") or ".." in fname.split("/"):
+            raise ValueError(f"unsafe path in archive: {fname}")
+        # 扩展名白名单
+        ext = Path(fname).suffix.lower()
+        if ext not in _ARCHIVE_ALLOWED_EXT:
+            raise ValueError(f"file type not allowed: {fname} (.{ext})")
+        # 文件数限制
+        if len(entries) >= _ARCHIVE_MAX_FILES:
+            raise ValueError(
+                f"too many files in archive (max {_ARCHIVE_MAX_FILES})"
+            )
+        data = zf.read(info)
+        # 单文件大小限制
+        if len(data) > _ARCHIVE_MAX_FILE_SIZE:
+            raise ValueError(f"file too large: {fname} (max {_ARCHIVE_MAX_FILE_SIZE})")
+        total_size += len(data)
+        if total_size > _ARCHIVE_MAX_TOTAL_SIZE:
+            raise ValueError(
+                f"archive too large (max {_ARCHIVE_MAX_TOTAL_SIZE})"
+            )
+        # 检查是否有 SKILL.md
+        basename = Path(fname).name
+        if basename == _SKILL_FILENAME:
+            has_skill_md = True
+        entries.append((fname, data))
+
+    zf.close()
+
+    if not has_skill_md:
+        raise ValueError(f"archive must contain {_SKILL_FILENAME}")
+
+    # 落盘到 skill 目录
+    base = _skills_base()
+    skill_dir = _tenant_dir(tenant_id) / name
+    resolved_base = _safe_resolve(skill_dir, base)
+    if resolved_base is None:
+        raise ValueError("skill path escapes skills_dir")
+
+    import shutil
+
+    # 清空旧目录（覆盖更新）
+    if skill_dir.is_dir():
+        shutil.rmtree(skill_dir)
+    skill_dir.mkdir(parents=True, exist_ok=True)
+
+    written_files: list[str] = []
+    for fname, data in entries:
+        # 构造安全的目标路径
+        target = skill_dir / fname
+        resolved = _safe_resolve(target, base)
+        if resolved is None:
+            raise ValueError(f"path escapes skills_dir: {fname}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        written_files.append(fname)
+
+    # 如果 SKILL.md 缺少 frontmatter，自动补上
+    skill_file = skill_dir / _SKILL_FILENAME
+    if skill_file.is_file():
+        text = skill_file.read_text(encoding="utf-8")
+        parsed = _parse_frontmatter(text)
+        meta, body = parsed
+        if "name" not in meta or "description" not in meta:
+            frontmatter = "---\n"
+            frontmatter += f"name: {name}\n"
+            frontmatter += f'description: "{description}"\n'
+            frontmatter += "---\n\n"
+            skill_file.write_text(frontmatter + body, encoding="utf-8")
+
+    logger.info(
+        "压缩包 skill 注册成功: %s (%d files)", name, len(written_files)
+    )
+    return {
+        "name": name,
+        "description": description,
+        "files": written_files,
+        "skill_file": str(skill_file),
+    }

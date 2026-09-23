@@ -22,6 +22,10 @@ import type {
   SkillItem,
   SkillListResponse,
   SseEvent,
+  SubAgentCreateRequest,
+  SubAgentItem,
+  SubAgentListResponse,
+  SubAgentUpdateRequest,
   WorkflowCreateRequest,
   WorkflowDefinition,
   WorkflowItem,
@@ -142,6 +146,72 @@ export async function deleteSkill(name: string): Promise<void> {
     headers: authHeaders(),
   })
   if (!r.ok) throw new Error('删除失败')
+}
+
+/** 上传 zip 压缩包注册复杂 skill（多文件） */
+export async function uploadSkillArchive(
+  name: string,
+  description: string,
+  file: File,
+): Promise<unknown> {
+  const form = new FormData()
+  form.append('name', name)
+  form.append('description', description)
+  form.append('file', file)
+  const r = await fetch('/api/v1/skills/upload-archive', {
+    method: 'POST',
+    headers: authHeaders(), // 不设 Content-Type，让浏览器自动加 multipart boundary
+    body: form,
+  })
+  return handle<unknown>(r)
+}
+
+// ----- V2.5：子代理管理 -----
+
+/** 列出当前租户的全部子代理（含内置镜像 + 自定义） */
+export async function listSubAgents(): Promise<SubAgentListResponse> {
+  const r = await fetch('/api/v2/subagents', { headers: authHeaders() })
+  return handle<SubAgentListResponse>(r)
+}
+
+export async function createSubAgent(
+  req: SubAgentCreateRequest,
+): Promise<SubAgentItem> {
+  const r = await fetch('/api/v2/subagents', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(req),
+  })
+  return handle<SubAgentItem>(r)
+}
+
+export async function updateSubAgent(
+  id: string,
+  req: SubAgentUpdateRequest,
+): Promise<SubAgentItem> {
+  const r = await fetch('/api/v2/subagents/' + encodeURIComponent(id), {
+    method: 'PUT',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(req),
+  })
+  return handle<SubAgentItem>(r)
+}
+
+export async function deleteSubAgent(id: string): Promise<void> {
+  const r = await fetch('/api/v2/subagents/' + encodeURIComponent(id), {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  if (!r.ok) throw new Error('删除失败')
+}
+
+/** 基于现有子代理（含内置）fork 一份自定义副本 */
+export async function forkSubAgent(id: string, newName: string): Promise<SubAgentItem> {
+  const r = await fetch(
+    `/api/v2/subagents/${encodeURIComponent(id)}/fork?new_name=${encodeURIComponent(newName)}`,
+    { method: 'POST', headers: authHeaders() },
+  )
+  return handle<SubAgentItem>(r)
 }
 
 // ----- 记忆 -----
@@ -331,6 +401,22 @@ export async function orchestrateWorkflow(
 ): Promise<OrchestratorRunResponse> {
   const r = await fetch(
     '/api/v2/workflows/' + encodeURIComponent(id) + '/orchestrate',
+    {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(req),
+    },
+  )
+  return handle<OrchestratorRunResponse>(r)
+}
+
+/** parallel 编排：fan-out 并行执行 subagents */
+export async function runParallelWorkflow(
+  id: string,
+  req: OrchestratorRunRequest,
+): Promise<OrchestratorRunResponse> {
+  const r = await fetch(
+    '/api/v2/workflows/' + encodeURIComponent(id) + '/orchestrate-parallel',
     {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),

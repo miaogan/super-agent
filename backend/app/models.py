@@ -151,6 +151,43 @@ class Skill(Base):
     )
 
 
+class SubAgent(Base):
+    """用户自定义子代理（V2.5：子代理管理页签）。
+
+    - 按 ``tenant_id`` + ``name`` 唯一约束
+    - 内容字段对齐 deepagents subagent spec：``name`` / ``description`` /
+      ``system_prompt`` / ``model`` / ``tools``
+    - ``tools`` 为逗号分隔字符串（便于 SQL 查询 + 与 skill tools 风格一致）
+    - ``is_builtin`` 标记内置子代理的镜像（首次访问时由 /api/agents 同步生成），
+      方便用户在内置基础上 fork 修改；用户自建时该字段为 False
+    - workflow 的 subagent 节点可直接通过 ``name`` 引用本表记录
+    """
+
+    __tablename__ = "subagents"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # model 留空时由主 agent 决定（"auto"）
+    model: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    # 逗号分隔工具清单（与 skills 风格一致；空 = 继承主 agent 工具集）
+    tools: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_subagents_tenant_name", "tenant_id", "name", unique=True),
+        Index("ix_subagents_tenant", "tenant_id"),
+    )
+
+
 # ---------------------------------------------------------------------- #
 # V2：Workflow / 版本 / 检查点
 # ---------------------------------------------------------------------- #

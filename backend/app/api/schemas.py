@@ -111,6 +111,43 @@ class SkillCreateRequest(BaseModel):
     content: str = Field(..., min_length=1)
 
 
+# ===== V2.5：子代理管理 =====
+
+
+class SubAgentItem(BaseModel):
+    """子代理清单/详情条目（与 deepagents subagent spec + ORM 字段对齐）。"""
+
+    id: str
+    name: str
+    description: str = ""
+    system_prompt: str = ""
+    model: str = ""
+    tools: list[str] = []
+    is_builtin: bool = False
+    created_at: str
+    updated_at: str
+
+
+class SubAgentListResponse(BaseModel):
+    items: list[SubAgentItem]
+
+
+class SubAgentCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = ""
+    system_prompt: str = ""
+    model: str = ""
+    tools: list[str] = []
+
+
+class SubAgentUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tools: list[str] | None = None
+
+
 # ===== V1：会话 =====
 
 

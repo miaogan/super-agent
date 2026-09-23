@@ -1,4 +1,4 @@
-﻿"""沙箱注册表：管理 OpenSandbox 沙箱的生命周期（创建/复用/空闲回收）。
+﻿"""沙箱注册表：管理 OpenSandbox 沙箱的生命周期（创建/复用/空闲回收/续期）。
 
 两种模式（环境变量 ``SANDBOX_MODE``）：
 
@@ -7,8 +7,15 @@
 - ``thread``：每个会话独立沙箱，会话之间文件系统完全隔离；
   适合多用户生产场景（资源消耗随并发增长）。
 
-空闲回收：后台协程周期检查 ``last_used``，超过 ``SANDBOX_IDLE_TTL``
-（秒，默认 900）的沙箱自动销毁，下次请求按需重建。
+生命周期策略
+------------
+- **预热**：``start()`` 时在 shared 模式下立即创建沙箱（消除首次对话冷启动）。
+- **续期**：每次 ``acquire()`` 调用会将 ``last_used`` 刷新到当前时间，
+  相当于"续期"——沙箱 30 分钟自毁，每次对话续期 15 分钟的效果由
+  ``renewal_seconds``（默认 900s=15min）控制：续期后沙箱的剩余存活时间
+  不低于 ``renewal_seconds``。
+- **空闲回收**：后台协程周期检查 ``last_used``，超过 ``idle_ttl``
+  （秒，默认 1800=30min）的沙箱自动销毁，下次请求按需重建。
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ logger = logging.getLogger(__name__)
 class _Entry:
     backend: OpenSandboxBackend
     last_used: float = field(default_factory=time.monotonic)
+    #: 沙箱自毁时间点（monotonic），续期时刷新
+    expires_at: float = field(default_factory=lambda: time.monotonic() + _env_idle_ttl())
 
 
 class SandboxRegistry:
@@ -38,10 +47,15 @@ class SandboxRegistry:
         *,
         mode: str | None = None,
         idle_ttl: float | None = None,
+        renewal_seconds: float | None = None,
         backend_factory=None,
     ) -> None:
         self.mode = (mode or _env_mode()).lower()
         self.idle_ttl = idle_ttl if idle_ttl is not None else _env_idle_ttl()
+        # 续期秒数：每次 acquire 后沙箱至少存活这么久（默认 15 分钟）
+        self.renewal_seconds = (
+            renewal_seconds if renewal_seconds is not None else _env_renewal_seconds()
+        )
         # backend_factory 用于测试注入 FakeSandbox；生产为 None（真实创建）
         self._factory = backend_factory
         self._shared: _Entry | None = None
@@ -52,7 +66,7 @@ class SandboxRegistry:
     # ------------------------------------------------------------------ #
 
     async def acquire(self, thread_id: str) -> OpenSandboxBackend:
-        """获取（复用或创建）沙箱后端。"""
+        """获取（复用或创建）沙箱后端，并续期。"""
         async with self._lock:
             entry: _Entry | None
             if self.mode == "shared":
@@ -67,7 +81,16 @@ class SandboxRegistry:
                     self._shared = entry
                 else:
                     self._by_thread[thread_id] = entry
-            entry.last_used = time.monotonic()
+            # 续期：刷新 last_used + expires_at
+            now = time.monotonic()
+            entry.last_used = now
+            entry.expires_at = now + self.renewal_seconds
+            logger.debug(
+                "沙箱 %s 续期 %ss（到期: %.0fs 后）",
+                entry.backend.id,
+                self.renewal_seconds,
+                entry.expires_at - now,
+            )
             return entry.backend
 
     async def release(self, thread_id: str) -> None:
@@ -87,9 +110,24 @@ class SandboxRegistry:
         return True
 
     async def start(self) -> None:
-        """启动空闲回收协程。"""
+        """启动空闲回收协程 + shared 模式预热沙箱。"""
         if self._reaper_task is None or self._reaper_task.done():
             self._reaper_task = asyncio.create_task(self._reaper(), name="sandbox-reaper")
+        # shared 模式：启动时立即创建沙箱（消除首次对话冷启动）
+        if self.mode == "shared" and self._shared is None:
+            try:
+                logger.info("预热 shared 沙箱...")
+                backend = await self._create_backend()
+                now = time.monotonic()
+                self._shared = _Entry(
+                    backend=backend,
+                    last_used=now,
+                    expires_at=now + self.idle_ttl,
+                )
+                logger.info("shared 沙箱预热完成: %s", backend.id)
+            except Exception:
+                # 预热失败不阻塞启动，首次对话时会按需重建
+                logger.exception("shared 沙箱预热失败（首次对话将按需创建）")
 
     async def close(self) -> None:
         """销毁全部沙箱并停止回收协程。"""
@@ -120,22 +158,22 @@ class SandboxRegistry:
         return await OpenSandboxBackend.acreate()
 
     async def _reaper(self) -> None:
-        """周期回收空闲沙箱。"""
+        """周期回收空闲沙箱（按 expires_at 判断，而非 last_used）。"""
         while True:
             await asyncio.sleep(60)
             try:
                 now = time.monotonic()
                 expired: list[_Entry] = []
                 async with self._lock:
-                    if self._shared is not None and now - self._shared.last_used > self.idle_ttl:
+                    if self._shared is not None and now > self._shared.expires_at:
                         expired.append(self._shared)
                         self._shared = None
                     for tid, entry in list(self._by_thread.items()):
-                        if now - entry.last_used > self.idle_ttl:
+                        if now > entry.expires_at:
                             expired.append(entry)
                             del self._by_thread[tid]
                 for entry in expired:
-                    logger.info("回收空闲沙箱 %s（TTL=%ss）", entry.backend.id, self.idle_ttl)
+                    logger.info("回收过期沙箱 %s", entry.backend.id)
                     await asyncio.to_thread(entry.backend.close, destroy=True)
             except asyncio.CancelledError:
                 raise
@@ -153,6 +191,17 @@ def _env_idle_ttl() -> float:
     import os
 
     try:
-        return float(os.getenv("SANDBOX_IDLE_TTL", "900"))
+        # 默认 30 分钟自毁
+        return float(os.getenv("SANDBOX_IDLE_TTL", "1800"))
+    except ValueError:
+        return 1800.0
+
+
+def _env_renewal_seconds() -> float:
+    import os
+
+    try:
+        # 每次对话续期 15 分钟
+        return float(os.getenv("SANDBOX_RENEWAL_SECONDS", "900"))
     except ValueError:
         return 900.0
