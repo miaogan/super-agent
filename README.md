@@ -374,6 +374,104 @@ python -m pytest tests/ -q
 | `OPENSANDBOX_TIMEOUT` | - | 沙箱空闲回收秒数 |
 | `USER_ID` | `demo_user` | 长期记忆归属用户 |
 | `MEMORY_TOP_K` | `5` | 每轮注入的记忆条数 |
+| `ENV` | `dev` | 环境标识（`prod`/`uat`/`test`），切换 `.env.<env>` |
+| `BACKEND_HOST` / `BACKEND_PORT` | `0.0.0.0` / `8000` | 后端监听地址 |
+| `BACKEND_URL` | `http://localhost:8000` | 后端对外暴露地址（供 nginx/前端定位） |
+| `FRONTEND_URL` | `http://localhost:8080` | 前端对外暴露地址 |
+| `NGINX_BACKEND_URL` | `http://backend:8000` | nginx 反代 API 的目标后端地址 |
+| `VITE_API_URL` | 空 | 前端构建时注入的 API 地址（跨源填后端地址） |
+| `CORS_ORIGINS` | `http://localhost:5173,...` | 允许的前端 origin（逗号分隔） |
+| `LOG_LEVEL` | `INFO` | 日志级别（`DEBUG`/`INFO`/`WARNING`） |
+
+## 三环境部署（prod / uat / test）
+
+项目支持服务**分离部署**（后端、nginx、数据库可不在同一个 Docker 甚至不在同一台主机），
+通过三份环境配置文件控制各环境的地址、密钥、配额等。
+
+### 配置文件
+
+| 文件 | 用途 | 启动命令 |
+|---|---|---|
+| [.env.test](.env.test) | 测试环境（CI、集成测试） | `docker compose --env-file .env.test up -d` |
+| [.env.uat](.env.uat) | 预发布环境（QA 验收） | `docker compose --env-file .env.uat up -d` |
+| [.env.prod](.env.prod) | 生产环境（线上） | `docker compose --env-file .env.prod up -d` |
+
+### 关键配置项（三环境均支持）
+
+```
+# 后端地址（独立部署时填后端实际可访问地址）
+BACKEND_HOST=0.0.0.0
+BACKEND_PORT=8000
+BACKEND_URL=http://backend-prod:8000
+
+# nginx 反代目标（跨主机时填后端实际 IP/域名）
+NGINX_BACKEND_URL=http://backend-prod:8000
+
+# 数据库地址（可跨主机指向独立 PG 实例）
+POSTGRES_HOST=postgres-prod
+POSTGRES_PORT=5432
+POSTGRES_USER=agent
+POSTGRES_PASSWORD=<强随机密码>
+POSTGRES_DB=agent_memory
+
+# 前端对外地址（供后端回调 / CORS）
+FRONTEND_URL=https://app.example.com
+
+# CORS 跨域（前端与后端不同源时必须）
+CORS_ORIGINS=https://app.example.com
+
+# 前端构建参数（同源走 nginx 反代留空；跨源填后端地址）
+VITE_API_URL=
+```
+
+### 分离部署示例
+
+**场景 A：全栈同主机（docker compose 一把梭）**
+
+```bash
+# 测试环境
+docker compose --env-file .env.test up -d
+
+# 生产环境（部署前修改 .env.prod 中的密码/key/域名）
+docker compose --env-file .env.prod up -d
+```
+
+**场景 B：后端 + 数据库在主机 1，前端 nginx 在主机 2**
+
+1. 主机 1：启动 postgres + backend
+   ```bash
+   # .env.prod 中 BACKEND_URL=http://10.0.1.10:8000
+   docker compose --env-file .env.prod up -d postgres backend
+   ```
+2. 主机 2：构建前端镜像并启动（指向主机 1 的后端）
+   ```bash
+   # .env.prod 中
+   # NGINX_BACKEND_URL=http://10.0.1.10:8000
+   # VITE_API_URL=  （同源走 nginx 反代）
+   docker compose --env-file .env.prod up -d frontend
+   ```
+
+**场景 C：前端纯静态托管（CDN/OSS），后端独立暴露**
+
+```bash
+# .env.prod 中
+# VITE_API_URL=https://api.example.com  （前端直连后端，不走 nginx 反代）
+# CORS_ORIGINS=https://app.example.com  （允许前端域名）
+
+# 构建前端静态包
+cd frontend && VITE_API_URL=https://api.example.com npm run build
+# 把 dist/ 上传到 CDN/OSS
+```
+
+### 后端直接指定环境（不走 docker-compose）
+
+```bash
+# 通过 ENV 环境变量切换
+ENV=prod python server.py
+ENV=test python server.py
+```
+
+后端 `app/config.py` 会优先加载项目根目录的 `.env.<ENV>`，再叠加 `.env`（兼容旧用法），最后读取进程环境变量。
 
 ## 主要参考
 

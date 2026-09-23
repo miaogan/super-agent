@@ -1,65 +1,123 @@
 services:
-  # PostgreSQL：多轮对话（checkpointer）+ 长期记忆（store）+ 多租户表的持久化后端
+  # ================================================================== #
+  # PostgreSQL：多轮对话（checkpointer）+ 长期记忆（store）+ 多租户表
+  # 数据库地址通过 .env.<env> 的 POSTGRES_HOST 配置（可跨主机）
+  # ================================================================== #
   postgres:
     image: postgres:16-alpine
-    container_name: agentforge-postgres
+    container_name: ${APP_NAME:-super-agent}-postgres
     environment:
-      POSTGRES_USER: agent
-      POSTGRES_PASSWORD: agent_pass
-      POSTGRES_DB: agent_memory
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-agent_memory}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - agent_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agent -d agent_memory"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent} -d ${POSTGRES_DB:-agent_memory}"]
       interval: 5s
       timeout: 3s
       retries: 10
 
-  # FastAPI 后端：纯 API 服务（不再托管前端静态页）
+  # ================================================================== #
+  # FastAPI 后端：纯 API 服务
+  # 后端地址 / 数据库 / CORS 等均从 .env.<env> 读取
+  # ================================================================== #
   backend:
     build: ./backend
-    container_name: agentforge-backend
+    container_name: ${APP_NAME:-super-agent}-backend
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://agent:agent_pass@postgres:5432/agent_memory
+      ENV: ${ENV:-dev}
+      APP_NAME: ${APP_NAME:-super-agent}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      BACKEND_HOST: ${BACKEND_HOST:-0.0.0.0}
+      BACKEND_PORT: ${BACKEND_PORT:-8000}
+      BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:8080}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:8080}
+      # 数据库（POSTGRES_HOST 指向实际数据库地址，可跨主机）
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-agent_memory}
+      DATABASE_URL: ${DATABASE_URL:-}
+      # LLM
       MODEL: ${MODEL:-anthropic:claude-sonnet-4-6}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      MEMORY_TOP_K: ${MEMORY_TOP_K:-5}
+      # OpenSandbox
       OPENSANDBOX_DOMAIN: ${OPENSANDBOX_DOMAIN:-host.docker.internal:8080}
       OPENSANDBOX_API_KEY: ${OPENSANDBOX_API_KEY:-local-dev-key}
       OPENSANDBOX_IMAGE: ${OPENSANDBOX_IMAGE:-python:3.11-slim}
+      OPENSANDBOX_TIMEOUT: ${OPENSANDBOX_TIMEOUT:-}
+      # 认证
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-1440}
+      # Skill
       SKILLS_DIR: ${SKILLS_DIR:-skills}
-      SANDBOX_MODE: ${SANDBOX_MODE:-shared}
-      CORS_ORIGINS: "http://localhost:5173,http://localhost:8080,http://frontend"
+      # RAG
+      RAG_MODE: ${RAG_MODE:-stub}
+      RAG_BASE_URL: ${RAG_BASE_URL:-}
+      RAG_API_KEY: ${RAG_API_KEY:-}
+      RAG_TIMEOUT_SECONDS: ${RAG_TIMEOUT_SECONDS:-10}
+      RAG_TOP_K: ${RAG_TOP_K:-5}
+      RAG_FAIL_OPEN: ${RAG_FAIL_OPEN:-1}
+      # 配额限流
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-0}
+      RATE_LIMIT_QPS: ${RATE_LIMIT_QPS:-10}
+      RATE_LIMIT_DAILY_TOKENS: ${RATE_LIMIT_DAILY_TOKENS:-1000000}
+      RATE_LIMIT_DAILY_CALLS: ${RATE_LIMIT_DAILY_CALLS:-1000}
+      RATE_LIMIT_REDIS_URL: ${RATE_LIMIT_REDIS_URL:-}
+      # 审计
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-90}
+      # MCP
+      MCP_SERVERS: ${MCP_SERVERS:-}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend/skills:/app/skills
       - ./backend/.env:/app/.env:ro
 
+  # ================================================================== #
   # 前端：Vite + Vue3 + TS，构建后由 nginx 托管 + 反代 /api
+  # nginx 反代地址通过 NGINX_BACKEND_URL 配置（可跨主机指向后端）
+  # ================================================================== #
   frontend:
-    build: ./frontend
-    container_name: agentforge-frontend
+    build:
+      context: ./frontend
+      args:
+        # 前端构建时注入 API 地址（跨源部署填后端地址；同源留空走 /api）
+        VITE_API_URL: ${VITE_API_URL:-}
+    container_name: ${APP_NAME:-super-agent}-frontend
     depends_on:
       - backend
+    environment:
+      NGINX_BACKEND_URL: ${NGINX_BACKEND_URL:-http://backend:8000}
     ports:
-      - "8080:80"
+      - "${FRONTEND_PORT:-8080}:80"
 
+  # ================================================================== #
   # OpenSandbox 服务端（可选）：
   # 服务端需要访问宿主机 Docker daemon 来创建沙箱容器，
   # Windows/macOS 下建议直接在宿主机运行：
   #   uvx opensandbox-server init-config sandbox.toml --example docker
   #   uvx opensandbox-server
   # Linux 下可取消注释以下配置（需挂载 /var/run/docker.sock）
+  # ================================================================== #
   # opensandbox:
   #   image: opensandbox/opensandbox-server:latest
-  #   container_name: agent-opensandbox
+  #   container_name: ${APP_NAME:-super-agent}-sandbox
   #   ports:
   #     - "8080:8080"
   #   volumes:

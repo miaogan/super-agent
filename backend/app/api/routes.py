@@ -1004,21 +1004,11 @@ def create_app(
     app = FastAPI(title="super-agent API", version="0.4.0", lifespan=lifespan)
     app.state.otel_config = otel_config
 
-    # CORS：允许前端 dev server（Vite 默认 5173）和容器化部署的 frontend 域访问
+    # CORS：从 settings.cors_origins 读取（三环境配置文件控制）
+    # 格式：逗号分隔的 origin 列表，如 "https://app.example.com"
     allowed_origins = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:8080",
-        "http://frontend:80",
+        o.strip() for o in settings.cors_origins.split(",") if o.strip()
     ]
-    # 额外放行环境变量配置的 origin（逗号分隔）
-    import os
-
-    extra = os.getenv("CORS_ORIGINS", "")
-    if extra:
-        allowed_origins.extend(
-            o.strip() for o in extra.split(",") if o.strip()
-        )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,

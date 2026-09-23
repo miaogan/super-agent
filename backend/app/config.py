@@ -1,4 +1,12 @@
-"""集中管理环境变量配置（从 .env 读取，参考 .env.example）。"""
+"""集中管理环境变量配置（从 .env 读取，参考 .env.example）。
+
+三环境配置（prod / uat / test）
+-------------------------------
+- 通过 ``ENV`` 环境变量切换：``ENV=prod|uat|test``
+- 优先加载项目根目录的 ``.env.<ENV>``（如 ``.env.prod``），再 fallback
+  到 ``.env``（兼容旧用法），最后读取进程环境变量（docker-compose 注入）。
+- 三个环境文件覆盖：后端地址、nginx 地址、数据库地址、CORS、配额等。
+"""
 
 from __future__ import annotations
 
@@ -10,8 +18,17 @@ from dotenv import load_dotenv
 
 # 同时加载项目根目录与当前目录下的 .env
 _ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_ROOT / ".env")
-load_dotenv()
+
+# 三环境配置：ENV=prod|uat|test 时优先加载 .env.<env>
+_env_name = os.getenv("ENV", "").strip().lower()
+if _env_name and _env_name in ("prod", "uat", "test"):
+    load_dotenv(_ROOT.parent / f".env.{_env_name}", override=True)
+    # 允许环境内再叠一层 .env（容器内 / 当前目录）
+    load_dotenv(_ROOT.parent / ".env", override=False)
+else:
+    # 未指定 ENV 时回退到原行为：加载 .env
+    load_dotenv(_ROOT.parent / ".env", override=True)
+load_dotenv(override=False)
 
 
 def _build_database_url() -> str:
@@ -39,6 +56,27 @@ def _optional_int(name: str) -> int | None:
 @dataclass(frozen=True)
 class Settings:
     """全局配置快照。"""
+
+    # ===== 环境 =====
+    env: str = field(default_factory=lambda: os.getenv("ENV", "dev"))
+    app_name: str = field(default_factory=lambda: os.getenv("APP_NAME", "super-agent"))
+    log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
+
+    # ===== 服务地址（独立部署时用于跨主机互访）=====
+    # 后端监听地址 / 端口
+    backend_host: str = field(default_factory=lambda: os.getenv("BACKEND_HOST", "0.0.0.0"))
+    backend_port: int = field(default_factory=lambda: _optional_int("BACKEND_PORT") or 8000)
+    # 后端对外暴露地址（供 nginx / 前端定位后端）
+    backend_url: str = field(default_factory=lambda: os.getenv("BACKEND_URL", "http://localhost:8000"))
+    # 前端对外暴露地址（供后端回调 / 邮件链接等场景）
+    frontend_url: str = field(default_factory=lambda: os.getenv("FRONTEND_URL", "http://localhost:8080"))
+
+    # ===== CORS 跨域 =====
+    cors_origins: str = field(
+        default_factory=lambda: os.getenv(
+            "CORS_ORIGINS", "http://localhost:5173,http://localhost:8080"
+        )
+    )
 
     # PostgreSQL
     database_url: str = field(default_factory=_build_database_url)

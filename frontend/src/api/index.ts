@@ -35,6 +35,24 @@ const TENANT_KEY = 'tenant_id'
 const USER_KEY = 'user_id'
 const EMAIL_KEY = 'email'
 
+// API base URL：构建时通过 VITE_API_URL 注入
+// - 同源部署（nginx 反代 /api）：留空，走相对路径 /api
+// - 跨源部署（前后端不同主机）：填后端地址，如 http://10.0.0.10:8000
+const API_BASE = import.meta.env.VITE_API_URL || ''
+
+/**
+ * 封装 fetch：自动拼接 API_BASE 前缀。
+ * 所有调用处仍用 fetch('/api/...') 风格，由本函数注入 baseURL。
+ */
+const _fetch = window.fetch.bind(window)
+window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  if (typeof input === 'string' && input.startsWith('/api')) {
+    const url = API_BASE ? `${API_BASE}${input}` : input
+    return _fetch(url, init)
+  }
+  return _fetch(input, init)
+}
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
 }

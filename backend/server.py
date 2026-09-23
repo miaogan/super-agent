@@ -21,9 +21,10 @@ import sys
 import uvicorn
 
 from app.api.routes import create_app
+from app.config import settings
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
@@ -31,7 +32,12 @@ app = create_app()
 
 
 def _serve() -> None:
-    config = uvicorn.Config(app, host="127.0.0.1", port=8000, log_level="info")
+    config = uvicorn.Config(
+        app,
+        host=settings.backend_host,
+        port=settings.backend_port,
+        log_level=settings.log_level.lower(),
+    )
     if sys.platform == "win32":
         # psycopg(async) 不支持 ProactorEventLoop；uvicorn 在 Windows 默认
         # 返回 ProactorEventLoop 工厂，这里覆盖为 SelectorEventLoop
