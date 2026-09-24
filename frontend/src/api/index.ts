@@ -11,6 +11,11 @@ import type {
   HistoryResponse,
   LoginRequest,
   LoginResponse,
+  MarketInstallResponse,
+  MarketPublishRequest,
+  MarketRateResponse,
+  MarketTemplateItem,
+  MarketTemplateListResponse,
   MemoriesResponse,
   MemoryItem,
   OrchestratorRunRequest,
@@ -410,11 +415,22 @@ export async function orchestrateWorkflow(
   return handle<OrchestratorRunResponse>(r)
 }
 
-/** parallel 编排：fan-out 并行执行 subagents */
+/** parallel 编排：fan-out 并行执行 subagents
+ *
+ * V3-T7 扩展：strategy 支持 first/all/merge/vote/judge；
+ * judge 策略可传 judge_spec 自定义法官。
+ */
 export async function runParallelWorkflow(
   id: string,
-  req: OrchestratorRunRequest,
-): Promise<OrchestratorRunResponse> {
+  req: OrchestratorRunRequest & {
+    strategy?: string
+    judge_spec?: Record<string, unknown>
+  },
+): Promise<OrchestratorRunResponse & {
+  vote_counts?: Record<string, number> | null
+  winner_vote?: string | null
+  judge_agent?: string | null
+}> {
   const r = await fetch(
     '/api/v2/workflows/' + encodeURIComponent(id) + '/orchestrate-parallel',
     {
@@ -462,4 +478,54 @@ export async function restoreCheckpoint(
     { method: 'POST', headers: authHeaders() },
   )
   return handle<CheckpointRestoreResponse>(r)
+}
+
+// ----- V3-T6：模板市场 -----
+
+/** 列出模板市场（全部租户发布，按安装量排序） */
+export async function listMarketTemplates(
+  type?: string,
+): Promise<MarketTemplateListResponse> {
+  const q = type ? `?type=${encodeURIComponent(type)}` : ''
+  const r = await fetch('/api/v3/market' + q, { headers: authHeaders() })
+  return handle<MarketTemplateListResponse>(r)
+}
+
+/** 把自有资源（workflow / skill / prompt）打包上架 */
+export async function publishMarketTemplate(
+  req: MarketPublishRequest,
+): Promise<MarketTemplateItem> {
+  const r = await fetch('/api/v3/market/publish', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(req),
+  })
+  return handle<MarketTemplateItem>(r)
+}
+
+/** 把市场模板安装到当前租户 */
+export async function installMarketTemplate(
+  templateId: string,
+): Promise<MarketInstallResponse> {
+  const r = await fetch(
+    '/api/v3/market/' + encodeURIComponent(templateId) + '/install',
+    { method: 'POST', headers: authHeaders() },
+  )
+  return handle<MarketInstallResponse>(r)
+}
+
+/** 给模板评分（1-5，重复评分覆盖） */
+export async function rateMarketTemplate(
+  templateId: string,
+  score: number,
+): Promise<MarketRateResponse> {
+  const r = await fetch(
+    '/api/v3/market/' + encodeURIComponent(templateId) + '/rate',
+    {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ score }),
+    },
+  )
+  return handle<MarketRateResponse>(r)
 }

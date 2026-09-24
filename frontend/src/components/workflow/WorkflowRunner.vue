@@ -16,8 +16,8 @@ const wf = useWorkflowStore()
 const selectedId = ref('')
 // 测试输入
 const taskInput = ref('')
-// 执行模式
-const runMode = ref<'sequential' | 'parallel'>('sequential')
+// 执行模式（V3-T7 新增 vote / judge）
+const runMode = ref<'sequential' | 'parallel' | 'vote' | 'judge'>('sequential')
 // 执行结果
 const runResult = ref<unknown>(null)
 const runError = ref('')
@@ -57,14 +57,15 @@ async function onRun() {
   const wfName = selectedWf.value?.name || selectedId.value
   try {
     let res: unknown
-    if (runMode.value === 'parallel') {
-      // parallel 编排
-      res = await api.runParallelWorkflow(selectedId.value, {
+    if (runMode.value === 'sequential') {
+      res = await api.orchestrateWorkflow(selectedId.value, {
         task: taskInput.value,
       })
     } else {
-      res = await api.orchestrateWorkflow(selectedId.value, {
+      // parallel / vote / judge 都走 orchestrate-parallel，strategy 区分
+      res = await api.runParallelWorkflow(selectedId.value, {
         task: taskInput.value,
+        strategy: runMode.value,
       })
     }
     runResult.value = res
@@ -165,6 +166,22 @@ onMounted(() => {
             value="parallel"
           />
           Parallel（并行 fan-out）
+        </label>
+        <label class="mode-opt" title="多数投票合并（V3-T7）">
+          <input
+            v-model="runMode"
+            type="radio"
+            value="vote"
+          />
+          Vote（多数投票）
+        </label>
+        <label class="mode-opt" title="法官代理综合评判（V3-T7）">
+          <input
+            v-model="runMode"
+            type="radio"
+            value="judge"
+          />
+          Judge（法官代理）
         </label>
         <span class="spacer" />
         <button

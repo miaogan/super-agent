@@ -272,7 +272,7 @@ class AdversarialOrchestrator:
             f"最佳答案："
         )
         if self.judge_runner is not None:
-            raw = await self.judge_runner(self.judge_spec, judge_task, context)
+            raw = await self.judge_runner(self.judge_spec, judge_task, ok_steps, context)
         else:
             from app.workflow.orchestrator import _default_runner  # noqa: PLC0415
 

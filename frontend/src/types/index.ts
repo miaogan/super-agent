@@ -338,3 +338,44 @@ export interface CheckpointRestoreResponse {
   source_thread_id: string
   target_thread_id: string
 }
+
+// ===== V3-T6：模板市场 =====
+
+export type MarketTemplateType = 'workflow' | 'skill' | 'prompt'
+
+export interface MarketTemplateItem {
+  id: string
+  type: MarketTemplateType
+  name: string
+  description: string
+  rating: number
+  rating_count: number
+  install_count: number
+  created_by: string
+  created_at: string
+}
+
+export interface MarketTemplateListResponse {
+  items: MarketTemplateItem[]
+}
+
+export interface MarketPublishRequest {
+  type: MarketTemplateType
+  source_id: string
+  name?: string
+  description?: string
+}
+
+export interface MarketInstallResponse {
+  template_id: string
+  type: string
+  name: string
+  installed_name: string
+  install_count: number
+}
+
+export interface MarketRateResponse {
+  template_id: string
+  rating: number
+  rating_count: number
+}

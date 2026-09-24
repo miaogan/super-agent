@@ -74,6 +74,16 @@ from app.api.schemas import (
     MCPToolCallResponse,
     MCPToolItem,
     MCPToolListResponse,
+    MarketInstallResponse,
+    MarketPublishRequest,
+    MarketRateRequest,
+    MarketRateResponse,
+    MarketTemplateItem,
+    MarketTemplateListResponse,
+    TEMPLATE_TYPE_PROMPT,
+    TEMPLATE_TYPE_SKILL,
+    TEMPLATE_TYPE_WORKFLOW,
+    TEMPLATE_TYPES,
     MeResponse,
     MemoryCreate,
     MemoryItem,
@@ -146,9 +156,12 @@ from app.models import (
     ApiKey as ApiKeyModel,
     AuditEventModel,
     Interrupt as InterruptModel,
+    MarketRating as MarketRatingModel,
+    MarketTemplate as MarketTemplateModel,
     Message,
     Prompt as PromptModel,
     Session as SessionModel,
+    Skill as SkillModel,
     SubAgent as SubAgentModel,
     TestCase as TestCaseModel,
     TestRun as TestRunModel,
@@ -203,6 +216,11 @@ from app.workflow import (
     spec_from_compiled,
     spec_from_compiled_parallel,
     traced_call,
+    # V3-T7：adversarial 子代理
+    ADVERSARIAL_STRATEGIES,
+    MERGE_JUDGE,
+    MERGE_VOTE,
+    AdversarialOrchestrator,
 )
 from app.workflow.rag import (
     RETRIEVE_KNOWLEDGE_TOOL,
@@ -1454,6 +1472,364 @@ def create_app(
         return _subagent_to_item(row)
 
     # ------------------------------------------------------------------ #
+    # V3-T6：模板市场（发布 / 列表 / 安装 / 评分）
+    # ------------------------------------------------------------------ #
+
+    def _market_to_item(row: MarketTemplateModel) -> MarketTemplateItem:
+        rating = (
+            round(row.rating_sum / row.rating_count, 2)
+            if row.rating_count
+            else 0.0
+        )
+        return MarketTemplateItem(
+            id=row.id,
+            type=row.type,
+            name=row.name,
+            description=row.description,
+            rating=rating,
+            rating_count=row.rating_count,
+            install_count=row.install_count,
+            created_by=row.created_by,
+            created_at=row.created_at.isoformat(),
+        )
+
+    @app.get("/api/v3/market", response_model=MarketTemplateListResponse)
+    async def market_list(
+        type: str | None = Query(None, description="workflow / skill / prompt"),
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> MarketTemplateListResponse:
+        """列出模板市场（全部租户发布，按安装量排序）。"""
+        stmt = select(MarketTemplateModel)
+        if type is not None:
+            if type not in TEMPLATE_TYPES:
+                raise HTTPException(status_code=400, detail=f"未知模板类型: {type}")
+            stmt = stmt.where(MarketTemplateModel.type == type)
+        stmt = stmt.order_by(
+            MarketTemplateModel.install_count.desc(),
+            MarketTemplateModel.created_at.desc(),
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        return MarketTemplateListResponse(
+            items=[_market_to_item(r) for r in rows]
+        )
+
+    @app.post("/api/v3/market/publish", response_model=MarketTemplateItem, status_code=201)
+    async def market_publish(
+        body: MarketPublishRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> MarketTemplateItem:
+        """把自有资源（workflow / skill / prompt）打包上架。"""
+        if body.type not in TEMPLATE_TYPES:
+            raise HTTPException(status_code=400, detail=f"未知模板类型: {body.type}")
+
+        if body.type == TEMPLATE_TYPE_WORKFLOW:
+            # 取 active 版本 definition 打包（先查 workflow 拿名字，避免 async lazy load）
+            wf_src = (
+                await db.execute(
+                    select(WorkflowModel).where(
+                        WorkflowModel.id == body.source_id,
+                        WorkflowModel.tenant_id == ctx.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if wf_src is None:
+                raise HTTPException(status_code=404, detail="workflow not found")
+            ver = await _get_active_version(db, ctx.tenant_id, body.source_id)
+            try:
+                definition = json.loads(ver.definition)
+            except (ValueError, TypeError):
+                definition = {"nodes": [], "edges": []}
+            name = body.name or wf_src.name
+            description = body.description
+            payload = json.dumps(
+                {
+                    "definition": definition,
+                    "name": name,
+                    "description": description,
+                },
+                ensure_ascii=False,
+            )
+            tname = name
+        elif body.type == TEMPLATE_TYPE_SKILL:
+            skills = list_skills(ctx.tenant_id)
+            src = next((s for s in skills if s.name == body.source_id), None)
+            if src is None:
+                raise HTTPException(status_code=404, detail="skill not found")
+            tname = body.name or src.name
+            payload = json.dumps(
+                {
+                    "name": src.name,
+                    "description": body.description or src.description,
+                    "content": src.content,
+                },
+                ensure_ascii=False,
+            )
+            description = body.description or src.description
+        else:  # prompt
+            p = (
+                await db.execute(
+                    select(PromptModel).where(
+                        PromptModel.tenant_id == ctx.tenant_id,
+                        PromptModel.key == body.source_id,
+                        PromptModel.is_active.is_(True),
+                    )
+                )
+            ).scalar_one_or_none()
+            if p is None:
+                raise HTTPException(status_code=404, detail="prompt not found")
+            tname = body.name or p.key
+            payload = json.dumps(
+                {
+                    "key": p.key,
+                    "content": p.content,
+                    "change_note": p.change_note,
+                },
+                ensure_ascii=False,
+            )
+            description = body.description
+
+        # 同租户 + 类型 + 名唯一；冲突时覆盖更新（重新发布）
+        existing = (
+            await db.execute(
+                select(MarketTemplateModel).where(
+                    MarketTemplateModel.tenant_id == ctx.tenant_id,
+                    MarketTemplateModel.type == body.type,
+                    MarketTemplateModel.name == tname,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.payload = payload
+            existing.description = description
+            existing.created_by = ctx.user_id
+            row = existing
+        else:
+            row = MarketTemplateModel(
+                tenant_id=ctx.tenant_id,
+                type=body.type,
+                name=tname,
+                description=description,
+                payload=payload,
+                created_by=ctx.user_id,
+            )
+            db.add(row)
+        await db.commit()
+        await db.refresh(row)
+        await audit_log(
+            tenant_id=ctx.tenant_id,
+            actor=ctx.user_id,
+            action="market.publish",
+            resource_type=f"template.{body.type}",
+            resource_id=row.id,
+        )
+        return _market_to_item(row)
+
+    @app.post("/api/v3/market/{template_id}/install", response_model=MarketInstallResponse)
+    async def market_install(
+        template_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> MarketInstallResponse:
+        """把市场模板安装到当前租户（复制 payload 为自有资源）。"""
+        row = (
+            await db.execute(
+                select(MarketTemplateModel).where(MarketTemplateModel.id == template_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="template not found")
+        try:
+            payload = json.loads(row.payload)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="template payload 损坏") from None
+
+        async with db.begin():
+            if row.type == TEMPLATE_TYPE_WORKFLOW:
+                definition = payload.get("definition", {"nodes": [], "edges": []})
+                try:
+                    cfg = compile_workflow(definition)
+                except CompileError as exc:
+                    raise HTTPException(status_code=400, detail=f"模板 workflow 非法: {exc}") from exc
+                base_name = payload.get("name") or row.name
+                name = base_name
+                # 同名冲突自动加后缀
+                n = 1
+                while True:
+                    dup = (
+                        await db.execute(
+                            select(WorkflowModel).where(
+                                WorkflowModel.tenant_id == ctx.tenant_id,
+                                WorkflowModel.name == name,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if dup is None:
+                        break
+                    n += 1
+                    name = f"{base_name} (安装{n})"
+                wf = WorkflowModel(
+                    tenant_id=ctx.tenant_id,
+                    name=name,
+                    description=payload.get("description", ""),
+                    active_version=1,
+                    is_deployed=False,
+                )
+                db.add(wf)
+                await db.flush()
+                db.add(
+                    WorkflowVersionModel(
+                        workflow_id=wf.id,
+                        tenant_id=ctx.tenant_id,
+                        version=1,
+                        definition=json.dumps(definition, ensure_ascii=False),
+                        compiled_config=cfg.to_json(),
+                    )
+                )
+                await db.flush()
+                installed_name = name
+            elif row.type == TEMPLATE_TYPE_SKILL:
+                skill_name = payload.get("name") or row.name
+                content = payload.get("content", "")
+                description = payload.get("description", "")
+                try:
+                    register_skill(ctx.tenant_id, skill_name, content, description)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                # 写 DB 元数据快照（同 tenant + name 唯一：先删旧）
+                old = (
+                    await db.execute(
+                        select(SkillModel).where(
+                            SkillModel.tenant_id == ctx.tenant_id,
+                            SkillModel.name == skill_name,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if old is not None:
+                    await db.delete(old)
+                    await db.flush()
+                db.add(
+                    SkillModel(
+                        tenant_id=ctx.tenant_id,
+                        name=skill_name,
+                        description=description,
+                        content=content,
+                        is_global=False,
+                    )
+                )
+                await db.flush()
+                installed_name = skill_name
+            else:  # prompt
+                key = payload.get("key") or row.name
+                content = payload.get("content", "")
+                change_note = payload.get("change_note", "")
+                # 同名 key 冲突加后缀
+                base_key = key
+                k = 1
+                while True:
+                    dup = (
+                        await db.execute(
+                            select(PromptModel).where(
+                                PromptModel.tenant_id == ctx.tenant_id,
+                                PromptModel.key == key,
+                            )
+                        )
+                    ).scalars().first()
+                    if dup is None:
+                        break
+                    k += 1
+                    key = f"{base_key}_installed{k}"
+                db.add(
+                    PromptModel(
+                        tenant_id=ctx.tenant_id,
+                        key=key,
+                        version=1,
+                        content=content,
+                        change_note=change_note or "从模板市场安装",
+                        is_active=True,
+                        created_by=ctx.email,
+                    )
+                )
+                await db.flush()
+                installed_name = key
+
+            row.install_count += 1
+
+        await audit_log(
+            tenant_id=ctx.tenant_id,
+            actor=ctx.user_id,
+            action="market.install",
+            resource_type=f"template.{row.type}",
+            resource_id=row.id,
+            detail={"installed_name": installed_name},
+        )
+        return MarketInstallResponse(
+            template_id=row.id,
+            type=row.type,
+            name=row.name,
+            installed_name=installed_name,
+            install_count=row.install_count,
+        )
+
+    @app.post("/api/v3/market/{template_id}/rate", response_model=MarketRateResponse)
+    async def market_rate(
+        template_id: str,
+        body: MarketRateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> MarketRateResponse:
+        """给模板评分（1-5）。同租户重复评分 = 覆盖更新。"""
+        row = (
+            await db.execute(
+                select(MarketTemplateModel).where(MarketTemplateModel.id == template_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="template not found")
+
+        # 先删旧评分（唯一约束 template_id + tenant_id）
+        old = (
+            await db.execute(
+                select(MarketRatingModel).where(
+                    MarketRatingModel.template_id == template_id,
+                    MarketRatingModel.tenant_id == ctx.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        async with db.begin():
+            if old is not None:
+                row.rating_sum -= old.score
+                row.rating_count -= 1
+                await db.delete(old)
+                # 先 flush 删除，避免同事务内 INSERT 撞唯一约束
+                await db.flush()
+            db.add(
+                MarketRatingModel(
+                    template_id=template_id,
+                    tenant_id=ctx.tenant_id,
+                    score=body.score,
+                )
+            )
+            row.rating_sum += body.score
+            row.rating_count += 1
+
+        await audit_log(
+            tenant_id=ctx.tenant_id,
+            actor=ctx.user_id,
+            action="market.rate",
+            resource_type="template",
+            resource_id=template_id,
+            detail={"score": body.score},
+        )
+        rating = round(row.rating_sum / row.rating_count, 2) if row.rating_count else 0.0
+        return MarketRateResponse(
+            template_id=template_id,
+            rating=rating,
+            rating_count=row.rating_count,
+        )
+
+    # ------------------------------------------------------------------ #
     # V1：会话列表 + 会话内消息历史（按 tenant 隔离）
     # ------------------------------------------------------------------ #
 
@@ -2049,10 +2425,12 @@ def create_app(
         ctx: TenantContext = Depends(get_current_user_dep),
         db: AsyncSession = Depends(get_db),
     ) -> ParallelRunResponse:
-        """V2.5-T3：按 active 版本编译产物 fan-out 并行执行 subagents。
+        """V2.5-T3 / V3-T7：按 active 版本编译产物 fan-out 并行执行 subagents。
 
         与 sequential 互补：适合多源调研 / 多模型对比 / 独立子任务并行。
-        合并策略：first（取首个成功）/ all（全部拼接）/ merge（自定义合并）。
+        合并策略：
+        - V2.5-T3：first（取首个成功）/ all（全部拼接）/ merge（自定义合并）
+        - V3-T7：vote（多数投票）/ judge（法官代理）→ 走 AdversarialOrchestrator
         """
         ver = await _get_active_version(db, ctx.tenant_id, workflow_id)
         try:
@@ -2064,23 +2442,41 @@ def create_app(
                 status_code=400,
                 detail="当前 workflow 无 subagent 节点，无法 parallel 编排",
             )
-        try:
-            orch = ParallelOrchestrator(
-                subagents=spec_from_compiled_parallel(
-                    cfg.subagents, fallback_model=cfg.model
-                ),
-                strategy=body.strategy,
-                min_success=body.min_success,
-                timeout_seconds=body.timeout_seconds,
-                separator=body.separator,
-                runner=getattr(app.state, "orchestrator_runner", None),
+        specs = spec_from_compiled_parallel(cfg.subagents, fallback_model=cfg.model)
+        runner = getattr(app.state, "orchestrator_runner", None)
+        # V3-T7：vote / judge 走对抗式编排器
+        if body.strategy in (MERGE_VOTE, MERGE_JUDGE):
+            try:
+                adv = AdversarialOrchestrator(
+                    subagents=specs,
+                    strategy=body.strategy,
+                    judge_spec=body.judge_spec,
+                    min_success=body.min_success,
+                    timeout_seconds=body.timeout_seconds,
+                    runner=runner,
+                )
+            except ParallelError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            result = await adv.run_adversarial(
+                body.task,
+                context={**(body.context or {}), "tenant_id": ctx.tenant_id},
             )
-        except ParallelError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        result = await orch.run_parallel(
-            body.task,
-            context={**(body.context or {}), "tenant_id": ctx.tenant_id},
-        )
+        else:
+            try:
+                orch = ParallelOrchestrator(
+                    subagents=specs,
+                    strategy=body.strategy,
+                    min_success=body.min_success,
+                    timeout_seconds=body.timeout_seconds,
+                    separator=body.separator,
+                    runner=runner,
+                )
+            except ParallelError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            result = await orch.run_parallel(
+                body.task,
+                context={**(body.context or {}), "tenant_id": ctx.tenant_id},
+            )
         await audit_log(
             tenant_id=ctx.tenant_id,
             actor=ctx.user_id,
@@ -2111,6 +2507,9 @@ def create_app(
             failure_count=result.failure_count,
             elapsed_ms=result.elapsed_ms,
             error=result.error,
+            vote_counts=getattr(result, "vote_counts", None),
+            winner_vote=getattr(result, "winner_vote", None),
+            judge_agent=getattr(result, "judge_agent", None),
         )
 
     # ================================================================== #

@@ -331,16 +331,24 @@ class OrchestratorRunResponse(BaseModel):
 
 
 class ParallelRunRequest(BaseModel):
-    """POST /api/v2/workflows/{id}/orchestrate-parallel 请求体。"""
+    """POST /api/v2/workflows/{id}/orchestrate-parallel 请求体。
+
+    V3-T7 扩展：``strategy`` 新增 ``vote``（多数投票）和 ``judge``（法官代理），
+    由 ``AdversarialOrchestrator`` 处理。
+    """
 
     task: str = Field(..., min_length=1)
     strategy: str = Field(
-        "all", description="合并策略：first / all / merge"
+        "all", description="合并策略：first / all / merge / vote / judge"
     )
     min_success: int = Field(1, ge=1, description="最少成功数（quorum）")
     timeout_seconds: float | None = Field(None, description="整体超时（秒）")
     separator: str = "\n---\n"
     context: dict | None = None
+    # V3-T7：judge 策略时自定义法官 spec（name/description/system_prompt/model）
+    judge_spec: dict | None = Field(
+        None, description="judge 策略的法官 spec；缺省用内建默认法官"
+    )
 
 
 class ParallelStepItem(BaseModel):
@@ -359,6 +367,70 @@ class ParallelRunResponse(BaseModel):
     failure_count: int
     elapsed_ms: int
     error: str | None = None
+    # V3-T7：adversarial 附加信息（vote 策略）
+    vote_counts: dict[str, int] | None = None
+    winner_vote: str | None = None
+    # V3-T7：adversarial 附加信息（judge 策略）
+    judge_agent: str | None = None
+
+
+# ===== V3-T6：模板市场 =====
+
+TEMPLATE_TYPE_WORKFLOW = "workflow"
+TEMPLATE_TYPE_SKILL = "skill"
+TEMPLATE_TYPE_PROMPT = "prompt"
+TEMPLATE_TYPES = {TEMPLATE_TYPE_WORKFLOW, TEMPLATE_TYPE_SKILL, TEMPLATE_TYPE_PROMPT}
+
+
+class MarketTemplateItem(BaseModel):
+    """模板市场条目。"""
+
+    id: str
+    type: str
+    name: str
+    description: str = ""
+    rating: float = 0.0
+    rating_count: int = 0
+    install_count: int = 0
+    created_by: str = ""
+    created_at: str
+
+
+class MarketTemplateListResponse(BaseModel):
+    items: list[MarketTemplateItem]
+
+
+class MarketPublishRequest(BaseModel):
+    """发布模板（从已有资源打包上架）。
+
+    - ``type=workflow``：需 ``source_id``（workflow id）
+    - ``type=skill``：需 ``source_id``（skill name）
+    - ``type=prompt``：需 ``source_id``（prompt key）
+    ``name`` 缺省用源资源名。
+    """
+
+    type: str = Field(..., description="workflow / skill / prompt")
+    source_id: str = Field(..., description="源资源 id（workflow id / skill name / prompt key）")
+    name: str | None = Field(None, max_length=128)
+    description: str = ""
+
+
+class MarketInstallResponse(BaseModel):
+    template_id: str
+    type: str
+    name: str
+    installed_name: str
+    install_count: int
+
+
+class MarketRateRequest(BaseModel):
+    score: int = Field(..., ge=1, le=5)
+
+
+class MarketRateResponse(BaseModel):
+    template_id: str
+    rating: float
+    rating_count: int
 
 
 # ===== V2-T8：评测面板 =====

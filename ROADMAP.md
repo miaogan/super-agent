@@ -288,6 +288,36 @@ V2 Docker ─────────── T11 K8s Helm ──── T12 OTel �
 
 > 注：V2.5 已覆盖单集群 K8s、灰度发布、RAG、安全治理基础；V3 聚焦微服务化 + A2A + 模板市场 + SSO。
 
+## V3 首批任务（已交付）
+
+> V3 按「自包含 + 复用 V2.5 基础设施」原则分批推进。首批交付与微服务拆分解耦的两项：
+
+| 任务 | 目标 | 状态 |
+|---|---|---|
+| **V3-T7** adversarial 子代理 | judge agent + 投票合并：`vote`（多数投票）/ `judge`（法官代理）两种合并策略，复用 V2.5 并行编排 fan-out | ✅ |
+| **V3-T6** 模板市场 | Workflow/Skill/Prompt 上架 + 一键安装 + 评分（1-5，重复评分覆盖） | ✅ |
+
+### V3-T7 关键实现
+
+- `backend/app/workflow/adversarial.py`：`AdversarialOrchestrator`，在 `ParallelOrchestrator` 的 fan-out 之上新增两种 fan-in 合并：
+  - `vote`：`vote_fn` 提取投票键（默认归一化全文，可自定义 JSON 字段）→ 多数票胜出，平票取首个
+  - `judge`：把任务 + 全部子代理输出交给 `judge_spec`（默认内建法官 / 可注入）综合评判
+- `POST /api/v2/workflows/{id}/orchestrate-parallel`：`strategy` 扩展 `vote` / `judge`，响应携带 `vote_counts` / `winner_vote` / `judge_agent`
+- 前端 WorkflowRunner：新增 Vote（多数投票）/ Judge（法官代理）两种运行模式
+
+### V3-T6 关键实现
+
+- `backend/app/models.py`：`MarketTemplate`（type/name/payload/rating 聚合/install_count）+ `MarketRating`（租户唯一，覆盖式评分）
+- API：`GET /api/v3/market`（按安装量排序）、`POST /api/v3/market/publish`（workflow/skill/prompt 打包上架）、`POST /api/v3/market/{id}/install`（复制为自有资源，同名自动加后缀）、`POST /api/v3/market/{id}/rate`（1-5 星，重复评分覆盖）
+- 前端：新增「模板市场」页签（浏览/发布/安装/评分）
+
+### V3 首批测试覆盖
+
+| 测试文件 | 覆盖范围 | 依赖 |
+|---|---|---|
+| `test_v25_adversarial.py` | vote 多数票/平票/自定义 vote_fn/空白归一化 + judge 自定义 runner/默认 spec + quorum/非法策略 | 无 |
+| `test_v25_market.py` | 表结构/唯一索引/发布列表/评分聚合/覆盖式评分/安装计数/租户隔离 | 无 |
+
 ## V3 验收
 
 - 4 个微服务独立部署，Nacos 注册可见

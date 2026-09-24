@@ -236,6 +236,14 @@ from app.workflow.otel import (
     setup_otel,
     trace_collector_hook,
 )
+from app.workflow.adversarial import (
+    ADVERSARIAL_STRATEGIES,
+    MERGE_JUDGE,
+    MERGE_VOTE,
+    AdversarialOrchestrator,
+    AdversarialResult,
+    default_vote_fn,
+)
 
 __all__ = [
     # 编译器
@@ -443,4 +451,11 @@ __all__ = [
     "reset_otel",
     "setup_otel",
     "trace_collector_hook",
+    # V3-T7 adversarial 子代理
+    "ADVERSARIAL_STRATEGIES",
+    "MERGE_JUDGE",
+    "MERGE_VOTE",
+    "AdversarialOrchestrator",
+    "AdversarialResult",
+    "default_vote_fn",
 ]

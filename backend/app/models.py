@@ -655,6 +655,90 @@ class WorkflowRelease(Base):
 
 
 # ---------------------------------------------------------------------- #
+# V3-T6：模板市场
+# ---------------------------------------------------------------------- #
+
+
+class MarketTemplate(Base):
+    """模板市场条目（V3-T6）。
+
+    - ``type``：workflow / skill / prompt 三类
+    - 发布：租户把自有资源（workflow / skill / prompt）打包上架
+    - 安装：其他租户把 ``payload`` 复制为自己的资源
+    - ``payload`` 是 JSON 字符串，按 type 不同：
+        - workflow：``{"definition": ..., "name": ..., "description": ...}``
+        - skill：``{"name": ..., "description": ..., "content": ...}``
+        - prompt：``{"key": ..., "content": ..., "change_note": ...}``
+    - ``rating_sum`` + ``rating_count`` 计算平均分；``install_count`` 统计安装次数
+    - 发布者不可重复上架同名模板（``source_tenant_id + type + name`` 唯一）
+    """
+
+    __tablename__ = "market_templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    # 发布者租户
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # workflow / skill / prompt
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 资源内容 JSON（安装时复制）
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    # 评分聚合
+    rating_sum: Mapped[int] = mapped_column(default=0, nullable=False)
+    rating_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    install_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        # 同发布者 + 类型 + 名称唯一
+        Index(
+            "ix_market_templates_tenant_type_name",
+            "tenant_id",
+            "type",
+            "name",
+            unique=True,
+        ),
+        Index("ix_market_templates_type", "type"),
+        Index("ix_market_templates_tenant", "tenant_id"),
+        Index("ix_market_templates_install", "install_count"),
+    )
+
+
+class MarketRating(Base):
+    """模板评分记录（V3-T6）。
+
+    一个租户对一个模板只能评一次（``template_id + tenant_id`` 唯一）；
+    重复评分 = 覆盖更新（先删旧再插，保证唯一约束）。
+    """
+
+    __tablename__ = "market_ratings"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    template_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("market_templates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    score: Mapped[int] = mapped_column(default=5, nullable=False)  # 1-5
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_market_ratings_template_tenant", "template_id", "tenant_id", unique=True),
+        Index("ix_market_ratings_template", "template_id"),
+    )
+
+
+# ---------------------------------------------------------------------- #
 # 引擎 / 会话工厂
 # ---------------------------------------------------------------------- #
 

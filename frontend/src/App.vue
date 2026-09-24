@@ -6,11 +6,12 @@ import ChatPanel from '@/components/ChatPanel.vue'
 import WorkflowBuilder from '@/components/workflow/WorkflowBuilder.vue'
 import WorkflowRunner from '@/components/workflow/WorkflowRunner.vue'
 import SubAgentManager from '@/components/SubAgentManager.vue'
+import MarketPlace from '@/components/MarketPlace.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const loggedIn = computed(() => !!auth.token)
-type View = 'chat' | 'workflow' | 'run' | 'agents'
+type View = 'chat' | 'workflow' | 'run' | 'agents' | 'market'
 const view = ref<View>('chat')
 </script>
 
@@ -49,6 +50,13 @@ const view = ref<View>('chat')
           >
             子代理
           </button>
+          <button
+            class="tab"
+            :class="{ on: view === 'market' }"
+            @click="view = 'market'"
+          >
+            模板市场
+          </button>
         </div>
         <div class="right">
           <span class="me">{{ auth.email }}</span>
@@ -60,6 +68,7 @@ const view = ref<View>('chat')
         <WorkflowBuilder v-else-if="view === 'workflow'" />
         <WorkflowRunner v-else-if="view === 'run'" />
         <SubAgentManager v-else-if="view === 'agents'" />
+        <MarketPlace v-else-if="view === 'market'" />
       </div>
     </main>
   </div>
