@@ -433,6 +433,136 @@ class MarketRateResponse(BaseModel):
     rating_count: int
 
 
+# ===== V3-T4 / V3-T5：A2A 协议最小子集 =====
+
+
+class A2AAgentCreateRequest(BaseModel):
+    """注册 A2A 外部 Agent 卡片（agent.json 最小子集）。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = ""
+    url: str = Field(..., min_length=1, max_length=512)
+    capabilities: list[str] = Field(
+        default_factory=list, description="能力声明，如 ['code_review', 'translate']"
+    )
+    version: str = "1.0"
+    authentication: dict | None = Field(
+        None, description="认证信息，如 {'type': 'bearer'}；发现接口不返回"
+    )
+
+
+class A2AAgentItem(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    url: str
+    capabilities: list[str] = Field(default_factory=list)
+    version: str = "1.0"
+    status: str = "active"
+    created_at: str
+
+
+class A2AAgentListResponse(BaseModel):
+    items: list[A2AAgentItem]
+
+
+class A2ADiscoverResponse(BaseModel):
+    """发现结果（跨租户，不含认证信息）。"""
+
+    items: list[A2AAgentItem]
+
+
+class A2ADispatchRequest(BaseModel):
+    task: str = Field(..., min_length=1)
+    context: dict | None = None
+    # true 时后台派发立即返回 submitted；false（默认）阻塞等结果
+    async_dispatch: bool = False
+
+
+class A2ATaskItem(BaseModel):
+    id: str
+    agent_name: str
+    task: str
+    status: str
+    result: str | None = None
+    error: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class A2ATaskResponse(BaseModel):
+    task: A2ATaskItem
+
+
+class A2ATaskListResponse(BaseModel):
+    items: list[A2ATaskItem]
+
+
+# ===== V3-T8：SSO =====
+
+
+class SSOProviderItem(BaseModel):
+    name: str
+    configured: bool = True
+    is_stub: bool = False
+    authorization_url: str = ""
+
+
+class SSOProvidersResponse(BaseModel):
+    items: list[SSOProviderItem]
+
+
+class SSOAuthorizeResponse(BaseModel):
+    provider: str
+    authorization_url: str
+    state: str
+    redirect_uri: str
+
+
+class SSOCallbackResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    tenant_id: str
+    user_id: str
+    email: str
+    display_name: str | None = None
+    bound: bool = False
+
+
+class SSODemoLoginRequest(BaseModel):
+    email: str = Field(..., min_length=3)
+    tenant_id: str = Field(..., min_length=1)
+    display_name: str | None = None
+
+
+# ===== V3-T8：PII 脱敏 =====
+
+
+class PIIMaskRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    mode: str = Field("partial", description="mask / partial / redact")
+    types: list[str] | None = None
+
+
+class PIIMatchItem(BaseModel):
+    type: str
+    start: int
+    end: int
+    value: str
+
+
+class PIIMaskResponse(BaseModel):
+    original: str
+    masked: str
+    mode: str
+    matches: list[PIIMatchItem] = Field(default_factory=list)
+
+
+class PIIConfigResponse(BaseModel):
+    mode: str
+    types: list[str] | None = None
+
+
 # ===== V2-T8：评测面板 =====
 
 

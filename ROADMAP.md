@@ -318,6 +318,47 @@ V2 Docker ─────────── T11 K8s Helm ──── T12 OTel �
 | `test_v25_adversarial.py` | vote 多数票/平票/自定义 vote_fn/空白归一化 + judge 自定义 runner/默认 spec + quorum/非法策略 | 无 |
 | `test_v25_market.py` | 表结构/唯一索引/发布列表/评分聚合/覆盖式评分/安装计数/租户隔离 | 无 |
 
+## V3 二批任务（已交付）
+
+> 二批聚焦协议演进 + 安全治理，与微服务拆分（T1-T3）继续解耦：
+
+| 任务 | 目标 | 状态 |
+|---|---|---|
+| **V3-T4** A2A Registry | agent.json 卡片注册 / 发现 / 能力声明 + 跨租户发现（不含认证信息） | ✅ |
+| **V3-T5** A2A Gateway | JSON-RPC 最小子集任务派发 + 状态同步（submitted→working→completed/failed/cancelled） | ✅ |
+| **V3-T8** SSO + 数据脱敏 | OAuth2 授权码最小子集（Stub IdP 离线演示）+ PII 检测/脱敏（mask/partial/redact） | ✅ |
+
+### V3-T4 / V3-T5 关键实现
+
+- `backend/app/workflow/a2a.py`：`A2ARegistry`（进程内注册中心）+ `AgentCard`（agent.json 最小子集）+ `A2AGateway`（任务派发 + 租户隔离）+ 传输层
+  - `InProcessTransport`：内置/演示代理处理器；`HttpTransport`：远程 JSON-RPC 2.0（message/send → task_id）；`RouterTransport`：进程内优先、HTTP 回退
+  - 协议工具：`make_jsonrpc_request` / `parse_jsonrpc_response`（error 字段 / 缺 result 抛 `A2AProtocolError`）
+  - 状态机：`transition_status`（终态不可迁移；submitted/working 可取消），包级导出别名 `transition_task_status`（避免与 HIL 同名冲突）
+- `backend/app/models.py`：`A2AAgent`（tenant+name 唯一，capabilities/authentication JSON）
+- API：`GET/POST/DELETE /api/v3/a2a/agents`、`GET /api/v3/a2a/discover?capability=`（跨租户）、`POST /api/v3/a2a/agents/{id}/dispatch`（阻塞/后台）、`GET /api/v3/a2a/tasks`、`GET /api/v3/a2a/tasks/{id}`、`POST /api/v3/a2a/tasks/{id}/cancel`、`POST /api/v3/a2a/demo/setup`（注册 3 个进程内演示代理）
+- 前端：新增「A2A 代理」页签（注册/发现/派发/任务列表 + 一键初始化演示代理）
+
+### V3-T8 关键实现
+
+- `backend/app/sso.py`：OAuth2 授权码流最小子集
+  - `build_authorization_url` → `exchange_code` → `fetch_userinfo` → `sso_login`（绑定/创建用户 + 签发 JWT）
+  - `StubIdP`：进程内 IdP（授权码 → token → userinfo），作为 transport 注入可离线跑通全流程（测试 + 演示）
+  - `SSOAccount` 绑定表（provider+subject 唯一）；state 信封（base64url JSON，含租户/回调/过期校验）
+  - provider 由环境变量发现：`SSO_<NAME>_CLIENT_ID/_CLIENT_SECRET/_AUTHORIZATION_URL/_TOKEN_URL/_USERINFO_URL`；内置 stub 演示 IdP（`SSO_STUB_ENABLED=0` 关闭）
+- `backend/app/pii.py`：PII 检测（邮箱/手机号/身份证/IP/银行卡，重叠长命中优先）+ 三种脱敏模式（mask/partial/redact）+ 结构化字段脱敏（`mask_pii_fields`，密钥类字段兜底整段打码）+ `PII_MASK_MODE`/`PII_MASK_TYPES` 配置
+- API：`GET /api/v3/sso/providers`、`GET /api/v3/sso/{provider}/authorize`、`GET /api/v3/sso/{provider}/callback`、`POST /api/v3/sso/{provider}/demo-login`（仅 stub）、`GET /api/v3/pii/config`、`POST /api/v3/pii/mask`
+- 前端：新增「SSO/脱敏」页签（provider 列表 + stub 演示登录 + PII 脱敏工具）
+
+### V3 二批测试覆盖
+
+| 测试文件 | 覆盖范围 | 依赖 |
+|---|---|---|
+| `test_v25_a2a.py` | Registry CRUD/发现/状态过滤 + Gateway 派发/取消/租户隔离 + 传输层/JSON-RPC 协议 + 表结构 | 无 |
+| `test_v25_sso.py` | Stub IdP 全流程 + 授权 URL/state 信封 + normalize 映射 + sso_login（SQLite 绑定/复用/404）+ 环境变量发现 | SQLite |
+| `test_v25_pii.py` | 各类型检测 + 三种模式 + 结构化脱敏 + 配置解析 | 无 |
+
+**测试结果**：573 passed, 11 skipped（V3 首批 513 + 二批新增 60）
+
 ## V3 验收
 
 - 4 个微服务独立部署，Nacos 注册可见

@@ -1,6 +1,13 @@
 // 后端 API 封装：fetch + JWT；SSE 用 ReadableStream 解析
 
 import type {
+  A2AAgentCreateRequest,
+  A2AAgentItem,
+  A2AAgentListResponse,
+  A2ADiscoverResponse,
+  A2ADispatchRequest,
+  A2ATaskListResponse,
+  A2ATaskResponse,
   AgentsResponse,
   CheckpointCreateRequest,
   CheckpointItem,
@@ -20,8 +27,14 @@ import type {
   MemoryItem,
   OrchestratorRunRequest,
   OrchestratorRunResponse,
+  PIIConfigResponse,
+  PIIMaskRequest,
+  PIIMaskResponse,
   RegisterRequest,
   RegisterResponse,
+  SSOCallbackResponse,
+  SSODemoLoginRequest,
+  SSOProvidersResponse,
   SessionListResponse,
   SkillCreateRequest,
   SkillItem,
@@ -82,6 +95,14 @@ export function clearAuth() {
 
 export function getStoredEmail(): string | null {
   return localStorage.getItem(EMAIL_KEY)
+}
+
+export function getStoredTenantId(): string | null {
+  return localStorage.getItem(TENANT_KEY)
+}
+
+export function getStoredUserId(): string | null {
+  return localStorage.getItem(USER_KEY)
 }
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -528,4 +549,131 @@ export async function rateMarketTemplate(
     },
   )
   return handle<MarketRateResponse>(r)
+}
+
+// ----- V3-T4 / V3-T5：A2A 协议 -----
+
+/** 列出当前租户的 A2A 卡片 */
+export async function listA2AAgents(): Promise<A2AAgentListResponse> {
+  const r = await fetch('/api/v3/a2a/agents', { headers: authHeaders() })
+  return handle<A2AAgentListResponse>(r)
+}
+
+/** 注册 A2A 外部 Agent 卡片 */
+export async function createA2AAgent(
+  req: A2AAgentCreateRequest,
+): Promise<A2AAgentItem> {
+  const r = await fetch('/api/v3/a2a/agents', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(req),
+  })
+  return handle<A2AAgentItem>(r)
+}
+
+/** 注销 A2A 卡片 */
+export async function deleteA2AAgent(agentId: string): Promise<void> {
+  const r = await fetch(
+    '/api/v3/a2a/agents/' + encodeURIComponent(agentId),
+    { method: 'DELETE', headers: authHeaders() },
+  )
+  await handle<{ ok: boolean }>(r)
+}
+
+/** 发现可派发的 A2A 卡片（跨租户，可按能力过滤） */
+export async function discoverA2AAgents(
+  capability?: string,
+): Promise<A2ADiscoverResponse> {
+  const q = capability
+    ? `?capability=${encodeURIComponent(capability)}`
+    : ''
+  const r = await fetch('/api/v3/a2a/discover' + q, { headers: authHeaders() })
+  return handle<A2ADiscoverResponse>(r)
+}
+
+/** 向 A2A 卡片派发任务 */
+export async function dispatchA2ATask(
+  agentId: string,
+  req: A2ADispatchRequest,
+): Promise<A2ATaskResponse> {
+  const r = await fetch(
+    '/api/v3/a2a/agents/' + encodeURIComponent(agentId) + '/dispatch',
+    {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(req),
+    },
+  )
+  return handle<A2ATaskResponse>(r)
+}
+
+/** 列出当前租户的 A2A 任务 */
+export async function listA2ATasks(): Promise<A2ATaskListResponse> {
+  const r = await fetch('/api/v3/a2a/tasks', { headers: authHeaders() })
+  return handle<A2ATaskListResponse>(r)
+}
+
+/** 查询 A2A 任务状态 */
+export async function getA2ATask(taskId: string): Promise<A2ATaskResponse> {
+  const r = await fetch(
+    '/api/v3/a2a/tasks/' + encodeURIComponent(taskId),
+    { headers: authHeaders() },
+  )
+  return handle<A2ATaskResponse>(r)
+}
+
+/** 取消 A2A 任务 */
+export async function cancelA2ATask(taskId: string): Promise<A2ATaskResponse> {
+  const r = await fetch(
+    '/api/v3/a2a/tasks/' + encodeURIComponent(taskId) + '/cancel',
+    { method: 'POST', headers: authHeaders() },
+  )
+  return handle<A2ATaskResponse>(r)
+}
+
+/** 注册 3 个进程内演示代理 */
+export async function setupA2ADemo(): Promise<A2AAgentListResponse> {
+  const r = await fetch('/api/v3/a2a/demo/setup', {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  return handle<A2AAgentListResponse>(r)
+}
+
+// ----- V3-T8：SSO -----
+
+/** 列出 SSO providers */
+export async function listSSOProviders(): Promise<SSOProvidersResponse> {
+  const r = await fetch('/api/v3/sso/providers')
+  return handle<SSOProvidersResponse>(r)
+}
+
+/** stub provider 演示登录（免跳转，走完整授权码流） */
+export async function ssoDemoLogin(
+  req: SSODemoLoginRequest,
+): Promise<SSOCallbackResponse> {
+  const r = await fetch('/api/v3/sso/stub/demo-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  return handle<SSOCallbackResponse>(r)
+}
+
+// ----- V3-T8：PII 脱敏 -----
+
+/** 当前脱敏配置 */
+export async function getPIIConfig(): Promise<PIIConfigResponse> {
+  const r = await fetch('/api/v3/pii/config', { headers: authHeaders() })
+  return handle<PIIConfigResponse>(r)
+}
+
+/** 对文本检测并脱敏 PII */
+export async function maskPII(req: PIIMaskRequest): Promise<PIIMaskResponse> {
+  const r = await fetch('/api/v3/pii/mask', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(req),
+  })
+  return handle<PIIMaskResponse>(r)
 }

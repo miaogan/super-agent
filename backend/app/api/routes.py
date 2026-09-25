@@ -45,6 +45,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent import SYSTEM_PROMPT, SUBAGENTS, build_agent
 from app.api.sandbox_registry import SandboxRegistry
 from app.api.schemas import (
+    A2AAgentCreateRequest,
+    A2AAgentItem,
+    A2AAgentListResponse,
+    A2ADiscoverResponse,
+    A2ADispatchRequest,
+    A2ATaskItem,
+    A2ATaskListResponse,
+    A2ATaskResponse,
     AgentInfo,
     AgentsResponse,
     AuditEventItem,
@@ -94,6 +102,10 @@ from app.api.schemas import (
     ParallelRunRequest,
     ParallelRunResponse,
     ParallelStepItem,
+    PIIConfigResponse,
+    PIIMaskRequest,
+    PIIMaskResponse,
+    PIIMatchItem,
     PluginItem,
     PluginListResponse,
     PluginManifestRequest,
@@ -118,6 +130,11 @@ from app.api.schemas import (
     RegisterResponse,
     SessionItem,
     SessionListResponse,
+    SSOAuthorizeResponse,
+    SSOCallbackResponse,
+    SSODemoLoginRequest,
+    SSOProviderItem,
+    SSOProvidersResponse,
     SkillCreateRequest,
     SkillItem,
     SkillListResponse,
@@ -153,6 +170,7 @@ from app.config import settings
 from app.db import _build_index_config
 from app.memory import memory_namespace
 from app.models import (
+    A2AAgent as A2AAgentModel,
     ApiKey as ApiKeyModel,
     AuditEventModel,
     Interrupt as InterruptModel,
@@ -160,6 +178,7 @@ from app.models import (
     MarketTemplate as MarketTemplateModel,
     Message,
     Prompt as PromptModel,
+    SSOAccount as SSOAccountModel,
     Session as SessionModel,
     Skill as SkillModel,
     SubAgent as SubAgentModel,
@@ -221,6 +240,37 @@ from app.workflow import (
     MERGE_JUDGE,
     MERGE_VOTE,
     AdversarialOrchestrator,
+    # V3-T4 / V3-T5：A2A 协议最小子集
+    A2AError,
+    A2ACardNotFoundError,
+    A2ATaskNotFoundError,
+    A2ARegistry,
+    AgentCard,
+    CARD_STATUS_ACTIVE,
+    CARD_STATUS_INACTIVE,
+    get_a2a_gateway,
+    get_a2a_registry,
+    get_a2a_transport,
+    reset_a2a_registry,
+)
+from app.pii import (
+    MASK_MODES,
+    PII_TYPES,
+    mask_pii,
+    mask_value,
+    pii_config_from_env,
+)
+from app.sso import (
+    SSOError,
+    SSOStateError,
+    STUB_PROVIDER,
+    StubIdP,
+    build_authorization_url,
+    decode_state,
+    encode_state,
+    require_sso_provider,
+    sso_login,
+    sso_providers_from_env,
 )
 from app.workflow.rag import (
     RETRIEVE_KNOWLEDGE_TOOL,
@@ -1827,6 +1877,534 @@ def create_app(
             template_id=template_id,
             rating=rating,
             rating_count=row.rating_count,
+        )
+
+    # ------------------------------------------------------------------ #
+    # V3-T4 / V3-T5：A2A 协议（卡片注册 + 发现 + 任务派发）
+    # ------------------------------------------------------------------ #
+
+    def _a2a_agent_to_item(row: A2AAgentModel) -> A2AAgentItem:
+        try:
+            caps = json.loads(row.capabilities) if row.capabilities else []
+        except (ValueError, TypeError):
+            caps = []
+        if not isinstance(caps, list):
+            caps = []
+        return A2AAgentItem(
+            id=row.id,
+            name=row.name,
+            description=row.description,
+            url=row.url,
+            capabilities=caps,
+            version=row.version,
+            status=row.status,
+            created_at=row.created_at.isoformat(),
+        )
+
+    def _a2a_task_to_item(task) -> A2ATaskItem:
+        return A2ATaskItem(
+            id=task.id,
+            agent_name=task.agent_name,
+            task=task.task,
+            status=task.status,
+            result=task.result,
+            error=task.error,
+            created_at=task.created_at.isoformat(),
+            updated_at=task.updated_at.isoformat(),
+        )
+
+    async def _sync_card_to_registry(db: AsyncSession, row: A2AAgentModel) -> None:
+        """把 DB 卡片同步进进程内注册中心（派发前调用，覆盖重启场景）。"""
+        try:
+            caps = json.loads(row.capabilities) if row.capabilities else []
+        except (ValueError, TypeError):
+            caps = []
+        if not isinstance(caps, list):
+            caps = []
+        try:
+            auth = json.loads(row.authentication) if row.authentication else {}
+        except (ValueError, TypeError):
+            auth = {}
+        card = AgentCard(
+            name=row.name,
+            description=row.description,
+            url=row.url,
+            capabilities=caps,
+            version=row.version,
+            authentication=auth or None,
+            status=row.status,
+        )
+        get_a2a_registry().register(card, replace=True)
+
+    @app.get("/api/v3/a2a/agents", response_model=A2AAgentListResponse)
+    async def a2a_agents_list(
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> A2AAgentListResponse:
+        """列出当前租户注册的 A2A 卡片。"""
+        rows = (
+            await db.execute(
+                select(A2AAgentModel)
+                .where(A2AAgentModel.tenant_id == ctx.tenant_id)
+                .order_by(A2AAgentModel.created_at.desc())
+            )
+        ).scalars().all()
+        return A2AAgentListResponse(items=[_a2a_agent_to_item(r) for r in rows])
+
+    @app.post("/api/v3/a2a/agents", response_model=A2AAgentItem, status_code=201)
+    async def a2a_agents_create(
+        body: A2AAgentCreateRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> A2AAgentItem:
+        """注册 A2A 外部 Agent 卡片（同租户同名覆盖）。"""
+        existing = (
+            await db.execute(
+                select(A2AAgentModel).where(
+                    A2AAgentModel.tenant_id == ctx.tenant_id,
+                    A2AAgentModel.name == body.name,
+                )
+            )
+        ).scalar_one_or_none()
+        async with db.begin():
+            if existing is not None:
+                existing.description = body.description
+                existing.url = body.url
+                existing.capabilities = json.dumps(body.capabilities, ensure_ascii=False)
+                existing.version = body.version
+                existing.authentication = json.dumps(
+                    body.authentication or {}, ensure_ascii=False
+                )
+                row = existing
+            else:
+                row = A2AAgentModel(
+                    tenant_id=ctx.tenant_id,
+                    name=body.name,
+                    description=body.description,
+                    url=body.url,
+                    capabilities=json.dumps(body.capabilities, ensure_ascii=False),
+                    version=body.version,
+                    authentication=json.dumps(
+                        body.authentication or {}, ensure_ascii=False
+                    ),
+                    status=CARD_STATUS_ACTIVE,
+                )
+                db.add(row)
+        await _sync_card_to_registry(db, row)
+        await audit_log(
+            tenant_id=ctx.tenant_id,
+            actor=ctx.user_id,
+            action="a2a.register",
+            resource_type="a2a_agent",
+            resource_id=row.id,
+            detail={"name": row.name, "capabilities": body.capabilities},
+        )
+        return _a2a_agent_to_item(row)
+
+    @app.delete("/api/v3/a2a/agents/{agent_id}")
+    async def a2a_agents_delete(
+        agent_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> dict:
+        """注销 A2A 卡片。"""
+        row = (
+            await db.execute(
+                select(A2AAgentModel).where(
+                    A2AAgentModel.id == agent_id,
+                    A2AAgentModel.tenant_id == ctx.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="agent not found")
+        name = row.name
+        async with db.begin():
+            await db.delete(row)
+        get_a2a_registry().unregister(name)
+        await audit_log(
+            tenant_id=ctx.tenant_id,
+            actor=ctx.user_id,
+            action="a2a.unregister",
+            resource_type="a2a_agent",
+            resource_id=agent_id,
+        )
+        return {"ok": True}
+
+    @app.get("/api/v3/a2a/discover", response_model=A2ADiscoverResponse)
+    async def a2a_discover(
+        capability: str | None = Query(None, description="按能力过滤"),
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> A2ADiscoverResponse:
+        """发现可派发的 A2A 卡片（跨租户，仅 active，不含认证信息）。"""
+        stmt = select(A2AAgentModel).where(A2AAgentModel.status == CARD_STATUS_ACTIVE)
+        rows = (await db.execute(stmt)).scalars().all()
+        out: list[A2AAgentItem] = []
+        for r in rows:
+            try:
+                caps = json.loads(r.capabilities) if r.capabilities else []
+            except (ValueError, TypeError):
+                caps = []
+            if not isinstance(caps, list):
+                caps = []
+            if capability is not None and capability not in caps:
+                continue
+            out.append(
+                A2AAgentItem(
+                    id=r.id,
+                    name=r.name,
+                    description=r.description,
+                    url=r.url,
+                    capabilities=caps,
+                    version=r.version,
+                    status=r.status,
+                    created_at=r.created_at.isoformat(),
+                )
+            )
+        return A2ADiscoverResponse(items=out)
+
+    @app.post(
+        "/api/v3/a2a/agents/{agent_id}/dispatch",
+        response_model=A2ATaskResponse,
+    )
+    async def a2a_dispatch(
+        agent_id: str,
+        body: A2ADispatchRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> A2ATaskResponse:
+        """向 A2A 卡片派发任务（阻塞或后台）。"""
+        row = (
+            await db.execute(
+                select(A2AAgentModel).where(
+                    A2AAgentModel.id == agent_id,
+                    A2AAgentModel.tenant_id == ctx.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="agent not found")
+        if row.status != CARD_STATUS_ACTIVE:
+            raise HTTPException(status_code=400, detail="agent 非 active")
+        await _sync_card_to_registry(db, row)
+        gateway = get_a2a_gateway()
+        try:
+            if body.async_dispatch:
+                task = await gateway.dispatch_async(
+                    row.name, ctx.tenant_id, body.task, body.context
+                )
+            else:
+                task = await gateway.dispatch(
+                    row.name, ctx.tenant_id, body.task, body.context
+                )
+        except A2AError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await audit_log(
+            tenant_id=ctx.tenant_id,
+            actor=ctx.user_id,
+            action="a2a.dispatch",
+            resource_type="a2a_agent",
+            resource_id=agent_id,
+            detail={"task_id": task.id, "async": body.async_dispatch},
+        )
+        return A2ATaskResponse(task=_a2a_task_to_item(task))
+
+    @app.get("/api/v3/a2a/tasks", response_model=A2ATaskListResponse)
+    async def a2a_tasks_list(
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> A2ATaskListResponse:
+        """列出当前租户的 A2A 任务。"""
+        tasks = get_a2a_gateway().list(ctx.tenant_id)
+        return A2ATaskListResponse(items=[_a2a_task_to_item(t) for t in tasks])
+
+    @app.get("/api/v3/a2a/tasks/{task_id}", response_model=A2ATaskResponse)
+    async def a2a_task_get(
+        task_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> A2ATaskResponse:
+        """查询任务状态（含结果）。"""
+        try:
+            task = await get_a2a_gateway().get(task_id)
+        except A2ATaskNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if task.tenant_id != ctx.tenant_id:
+            raise HTTPException(status_code=404, detail="task not found")
+        return A2ATaskResponse(task=_a2a_task_to_item(task))
+
+    @app.post(
+        "/api/v3/a2a/tasks/{task_id}/cancel",
+        response_model=A2ATaskResponse,
+    )
+    async def a2a_task_cancel(
+        task_id: str,
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> A2ATaskResponse:
+        """取消任务（非终态才生效）。"""
+        try:
+            task = await get_a2a_gateway().cancel(task_id)
+        except A2ATaskNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if task.tenant_id != ctx.tenant_id:
+            raise HTTPException(status_code=404, detail="task not found")
+        return A2ATaskResponse(task=_a2a_task_to_item(task))
+
+    # 演示内置代理（进程内处理器，满足「注册 3 个外部 Agent 可派发」验收）
+    _DEMO_AGENTS = [
+        {
+            "name": "demo-echo",
+            "description": "回显代理：原样返回任务",
+            "url": "inprocess://demo-echo",
+            "capabilities": ["echo"],
+        },
+        {
+            "name": "demo-reviewer",
+            "description": "代码评审代理：返回评审摘要",
+            "url": "inprocess://demo-reviewer",
+            "capabilities": ["code_review"],
+        },
+        {
+            "name": "demo-translator",
+            "description": "翻译代理：返回翻译占位结果",
+            "url": "inprocess://demo-translator",
+            "capabilities": ["translate"],
+        },
+    ]
+
+    @app.post("/api/v3/a2a/demo/setup", response_model=A2AAgentListResponse)
+    async def a2a_demo_setup(
+        ctx: TenantContext = Depends(get_current_user_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> A2AAgentListResponse:
+        """注册 3 个进程内演示代理（同名幂等），并挂载处理器。"""
+        transport = get_a2a_transport()
+
+        async def _handler_echo(task: str, context: dict) -> str:
+            return f"[echo] {task}"
+
+        async def _handler_reviewer(task: str, context: dict) -> str:
+            return f"[review] 已评审，建议 3 处改进：{task[:80]}"
+
+        async def _handler_translator(task: str, context: dict) -> str:
+            return f"[translate] (stub) {task}"
+
+        transport.register_handler("demo-echo", _handler_echo)
+        transport.register_handler("demo-reviewer", _handler_reviewer)
+        transport.register_handler("demo-translator", _handler_translator)
+
+        items: list[A2AAgentItem] = []
+        for spec in _DEMO_AGENTS:
+            existing = (
+                await db.execute(
+                    select(A2AAgentModel).where(
+                        A2AAgentModel.tenant_id == ctx.tenant_id,
+                        A2AAgentModel.name == spec["name"],
+                    )
+                )
+            ).scalar_one_or_none()
+            async with db.begin():
+                if existing is not None:
+                    existing.description = spec["description"]
+                    existing.url = spec["url"]
+                    existing.capabilities = json.dumps(
+                        spec["capabilities"], ensure_ascii=False
+                    )
+                    existing.status = CARD_STATUS_ACTIVE
+                    row = existing
+                else:
+                    row = A2AAgentModel(
+                        tenant_id=ctx.tenant_id,
+                        name=spec["name"],
+                        description=spec["description"],
+                        url=spec["url"],
+                        capabilities=json.dumps(
+                            spec["capabilities"], ensure_ascii=False
+                        ),
+                        version="1.0",
+                        authentication="{}",
+                        status=CARD_STATUS_ACTIVE,
+                    )
+                    db.add(row)
+            await _sync_card_to_registry(db, row)
+            items.append(_a2a_agent_to_item(row))
+        await audit_log(
+            tenant_id=ctx.tenant_id,
+            actor=ctx.user_id,
+            action="a2a.demo_setup",
+            resource_type="a2a_agent",
+            detail={"agents": [s["name"] for s in _DEMO_AGENTS]},
+        )
+        return A2AAgentListResponse(items=items)
+
+    # ------------------------------------------------------------------ #
+    # V3-T8：SSO（OAuth2 授权码最小子集）
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/v3/sso/providers", response_model=SSOProvidersResponse)
+    async def sso_providers_list() -> SSOProvidersResponse:
+        """列出可用的 SSO providers（含 stub 演示）。"""
+        providers = sso_providers_from_env()
+        items = [
+            SSOProviderItem(
+                name=name,
+                configured=True,
+                is_stub=name == STUB_PROVIDER,
+            )
+            for name in sorted(providers)
+        ]
+        return SSOProvidersResponse(items=items)
+
+    @app.get("/api/v3/sso/{provider}/authorize", response_model=SSOAuthorizeResponse)
+    async def sso_authorize(
+        provider: str,
+        tenant_id: str = Query(...),
+        redirect_uri: str | None = Query(None),
+    ) -> SSOAuthorizeResponse:
+        """构造 OAuth2 授权 URL（授权码流第一步）。"""
+        try:
+            cfg = require_sso_provider(provider)
+        except SSOError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        callback = redirect_uri or f"{settings.backend_url}/api/v3/sso/{provider}/callback"
+        state = encode_state(
+            tenant_id=tenant_id,
+            redirect_uri=callback,
+            provider=provider,
+        )
+        url = build_authorization_url(cfg, state=state, redirect_uri=callback)
+        return SSOAuthorizeResponse(
+            provider=provider,
+            authorization_url=url,
+            state=state,
+            redirect_uri=callback,
+        )
+
+    @app.get("/api/v3/sso/{provider}/callback", response_model=SSOCallbackResponse)
+    async def sso_callback(
+        provider: str,
+        code: str = Query(...),
+        state: str = Query(...),
+    ) -> SSOCallbackResponse:
+        """OAuth2 回调：兑换 code → 用户信息 → 绑定/创建用户 → 签发 JWT。"""
+        try:
+            cfg = require_sso_provider(provider)
+            payload = decode_state(state, provider=provider)
+        except SSOError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        redirect_uri = payload.get("redirect_uri") or None
+        try:
+            result = await sso_login(
+                cfg,
+                code,
+                redirect_uri=redirect_uri,
+                tenant_id=payload["tenant_id"],
+                session_factory=get_session_factory(),
+            )
+        except SSOError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await audit_log(
+            tenant_id=result["tenant_id"],
+            actor=result["user_id"],
+            action="sso.login",
+            resource_type="sso",
+            resource_id=provider,
+            detail={"provider": provider, "bound": result["bound"]},
+        )
+        return SSOCallbackResponse(
+            access_token=result["access_token"],
+            token_type="bearer",
+            tenant_id=result["tenant_id"],
+            user_id=result["user_id"],
+            email=result["email"],
+            display_name=result["display_name"],
+            bound=result["bound"],
+        )
+
+    @app.post(
+        "/api/v3/sso/{provider}/demo-login",
+        response_model=SSOCallbackResponse,
+    )
+    async def sso_demo_login(
+        provider: str,
+        body: SSODemoLoginRequest,
+    ) -> SSOCallbackResponse:
+        """stub provider 演示登录：免跳转，直接走完整授权码流（仅 stub）。"""
+        if provider != STUB_PROVIDER:
+            raise HTTPException(status_code=404, detail="仅 stub provider 支持演示登录")
+        try:
+            cfg = require_sso_provider(provider)
+        except SSOError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        idp = StubIdP()
+        idp.register_user(body.email, body.display_name or body.email.split("@")[0])
+        code = idp.authorize(body.email)
+        result = await sso_login(
+            cfg,
+            code,
+            redirect_uri=None,
+            tenant_id=body.tenant_id,
+            session_factory=get_session_factory(),
+            transport=idp,
+        )
+        return SSOCallbackResponse(
+            access_token=result["access_token"],
+            token_type="bearer",
+            tenant_id=result["tenant_id"],
+            user_id=result["user_id"],
+            email=result["email"],
+            display_name=result["display_name"],
+            bound=result["bound"],
+        )
+
+    # ------------------------------------------------------------------ #
+    # V3-T8：PII 检测与脱敏
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/v3/pii/config", response_model=PIIConfigResponse)
+    async def pii_config_get(
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> PIIConfigResponse:
+        """当前脱敏配置。"""
+        cfg = pii_config_from_env()
+        return PIIConfigResponse(
+            mode=cfg.mode,
+            types=sorted(cfg.types) if cfg.types else None,
+        )
+
+    @app.post("/api/v3/pii/mask", response_model=PIIMaskResponse)
+    async def pii_mask_text(
+        body: PIIMaskRequest,
+        ctx: TenantContext = Depends(get_current_user_dep),
+    ) -> PIIMaskResponse:
+        """对文本检测并脱敏 PII（mask / partial / redact）。"""
+        if body.mode not in MASK_MODES:
+            raise HTTPException(status_code=400, detail=f"未知脱敏模式: {body.mode}")
+        types = None
+        if body.types is not None:
+            types = [t for t in body.types if t in PII_TYPES]
+            if not types:
+                types = None
+        masked, matches = mask_pii(body.text, mode=body.mode, types=types)
+        await audit_log(
+            tenant_id=ctx.tenant_id,
+            actor=ctx.user_id,
+            action="pii.mask",
+            resource_type="pii",
+            detail={"mode": body.mode, "hits": len(matches)},
+        )
+        return PIIMaskResponse(
+            original=body.text,
+            masked=masked,
+            mode=body.mode,
+            matches=[
+                PIIMatchItem(
+                    type=m.type,
+                    start=m.start,
+                    end=m.end,
+                    value=mask_value(m.type, m.value, body.mode),
+                )
+                for m in matches
+            ],
         )
 
     # ------------------------------------------------------------------ #

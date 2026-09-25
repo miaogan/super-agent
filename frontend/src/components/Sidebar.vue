@@ -4,7 +4,7 @@ import { useChatStore } from '@/stores/chat'
 import { useSubAgentsStore } from '@/stores/subagents'
 import * as api from '@/api'
 
-type View = 'chat' | 'workflow' | 'run' | 'agents' | 'market'
+type View = 'chat' | 'workflow' | 'run' | 'agents' | 'market' | 'a2a' | 'sso'
 const props = defineProps<{ view?: View }>()
 const emit = defineEmits<{ switchView: [View] }>()
 

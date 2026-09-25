@@ -739,6 +739,95 @@ class MarketRating(Base):
 
 
 # ---------------------------------------------------------------------- #
+# V3-T4：A2A 外部 Agent 卡片
+# ---------------------------------------------------------------------- #
+
+
+class A2AAgent(Base):
+    """A2A 外部 Agent 卡片（V3-T4，agent.json 最小子集）。
+
+    - ``name``：Agent 唯一名（租户内唯一）
+    - ``url``：JSON-RPC 端点（message/send / task/get ...）
+    - ``capabilities``：能力声明（JSON 列表，如 ``["code_review", "translate"]``）
+    - ``version``：卡片版本
+    - ``authentication``：认证信息（JSON，如 ``{"type": "bearer"}``）；
+      发现接口不返回该字段（避免泄露密钥）
+    - ``status``：active / inactive（inactive 不可被发现/派发）
+    """
+
+    __tablename__ = "a2a_agents"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    url: Mapped[str] = mapped_column(String(512), nullable=False)
+    # JSON 列表：["code_review", "translate"]
+    capabilities: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    version: Mapped[str] = mapped_column(String(32), default="1.0", nullable=False)
+    # JSON：{"type": "none"} / {"type": "bearer"}
+    authentication: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    # active / inactive
+    status: Mapped[str] = mapped_column(
+        String(16), default="active", nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_a2a_agents_tenant", "tenant_id"),
+        Index("ix_a2a_agents_tenant_name", "tenant_id", "name", unique=True),
+        Index("ix_a2a_agents_status", "status"),
+    )
+
+
+# ---------------------------------------------------------------------- #
+# V3-T8：SSO 账号绑定
+# ---------------------------------------------------------------------- #
+
+
+class SSOAccount(Base):
+    """SSO 账号绑定（V3-T8）。
+
+    ``(provider, subject)`` 唯一 → 映射到租户内用户。
+    - ``provider``：IdP 名（如 google / github / stub）
+    - ``subject``：IdP 侧用户唯一标识
+    - SSO 专属用户 ``password_hash`` 用 ``"!"`` 占位（不可密码登录）
+    """
+
+    __tablename__ = "sso_accounts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_sso_accounts_provider_subject",
+            "provider",
+            "subject",
+            unique=True,
+        ),
+        Index("ix_sso_accounts_tenant", "tenant_id"),
+        Index("ix_sso_accounts_user", "user_id"),
+    )
+
+
+# ---------------------------------------------------------------------- #
 # 引擎 / 会话工厂
 # ---------------------------------------------------------------------- #
 

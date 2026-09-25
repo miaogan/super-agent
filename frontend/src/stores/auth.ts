@@ -6,6 +6,8 @@ import type { LoginRequest, RegisterRequest } from '@/types'
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(api.getToken())
   const email = ref<string | null>(api.getStoredEmail())
+  const tenantId = ref<string | null>(api.getStoredTenantId())
+  const userId = ref<string | null>(api.getStoredUserId())
   const authMode = ref<'login' | 'register'>('login')
   const error = ref<string>('')
 
@@ -30,6 +32,8 @@ export const useAuthStore = defineStore('auth', () => {
       const r = await api.login(req)
       token.value = r.access_token
       email.value = r.email
+      tenantId.value = r.tenant_id
+      userId.value = r.user_id
       api.saveAuth(r)
       return true
     } catch (e) {
@@ -41,12 +45,16 @@ export const useAuthStore = defineStore('auth', () => {
   function logout() {
     token.value = null
     email.value = null
+    tenantId.value = null
+    userId.value = null
     api.clearAuth()
   }
 
   return {
     token,
     email,
+    tenantId,
+    userId,
     authMode,
     error,
     isAuthenticated,

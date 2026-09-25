@@ -7,11 +7,13 @@ import WorkflowBuilder from '@/components/workflow/WorkflowBuilder.vue'
 import WorkflowRunner from '@/components/workflow/WorkflowRunner.vue'
 import SubAgentManager from '@/components/SubAgentManager.vue'
 import MarketPlace from '@/components/MarketPlace.vue'
+import A2ARegistry from '@/components/A2ARegistry.vue'
+import SSOSettings from '@/components/SSOSettings.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const loggedIn = computed(() => !!auth.token)
-type View = 'chat' | 'workflow' | 'run' | 'agents' | 'market'
+type View = 'chat' | 'workflow' | 'run' | 'agents' | 'market' | 'a2a' | 'sso'
 const view = ref<View>('chat')
 </script>
 
@@ -57,6 +59,20 @@ const view = ref<View>('chat')
           >
             模板市场
           </button>
+          <button
+            class="tab"
+            :class="{ on: view === 'a2a' }"
+            @click="view = 'a2a'"
+          >
+            A2A 代理
+          </button>
+          <button
+            class="tab"
+            :class="{ on: view === 'sso' }"
+            @click="view = 'sso'"
+          >
+            SSO/脱敏
+          </button>
         </div>
         <div class="right">
           <span class="me">{{ auth.email }}</span>
@@ -69,6 +85,8 @@ const view = ref<View>('chat')
         <WorkflowRunner v-else-if="view === 'run'" />
         <SubAgentManager v-else-if="view === 'agents'" />
         <MarketPlace v-else-if="view === 'market'" />
+        <A2ARegistry v-else-if="view === 'a2a'" />
+        <SSOSettings v-else-if="view === 'sso'" />
       </div>
     </main>
   </div>

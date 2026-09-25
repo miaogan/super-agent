@@ -379,3 +379,121 @@ export interface MarketRateResponse {
   rating: number
   rating_count: number
 }
+
+// ----- V3-T4 / V3-T5：A2A 协议 -----
+
+export interface A2AAgentCreateRequest {
+  name: string
+  description?: string
+  url: string
+  capabilities?: string[]
+  version?: string
+  authentication?: Record<string, unknown> | null
+}
+
+export interface A2AAgentItem {
+  id: string
+  name: string
+  description: string
+  url: string
+  capabilities: string[]
+  version: string
+  status: string
+  created_at: string
+}
+
+export interface A2AAgentListResponse {
+  items: A2AAgentItem[]
+}
+
+export interface A2ADiscoverResponse {
+  items: A2AAgentItem[]
+}
+
+export interface A2ADispatchRequest {
+  task: string
+  context?: Record<string, unknown> | null
+  async_dispatch?: boolean
+}
+
+export interface A2ATaskItem {
+  id: string
+  agent_name: string
+  task: string
+  status: string
+  result: string | null
+  error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface A2ATaskResponse {
+  task: A2ATaskItem
+}
+
+export interface A2ATaskListResponse {
+  items: A2ATaskItem[]
+}
+
+// ----- V3-T8：SSO -----
+
+export interface SSOProviderItem {
+  name: string
+  configured: boolean
+  is_stub: boolean
+  authorization_url: string
+}
+
+export interface SSOProvidersResponse {
+  items: SSOProviderItem[]
+}
+
+export interface SSOAuthorizeResponse {
+  provider: string
+  authorization_url: string
+  state: string
+  redirect_uri: string
+}
+
+export interface SSOCallbackResponse {
+  access_token: string
+  token_type: string
+  tenant_id: string
+  user_id: string
+  email: string
+  display_name: string | null
+  bound: boolean
+}
+
+export interface SSODemoLoginRequest {
+  email: string
+  tenant_id: string
+  display_name?: string | null
+}
+
+// ----- V3-T8：PII 脱敏 -----
+
+export interface PIIMaskRequest {
+  text: string
+  mode?: string
+  types?: string[] | null
+}
+
+export interface PIIMatchItem {
+  type: string
+  start: number
+  end: number
+  value: string
+}
+
+export interface PIIMaskResponse {
+  original: string
+  masked: string
+  mode: string
+  matches: PIIMatchItem[]
+}
+
+export interface PIIConfigResponse {
+  mode: string
+  types: string[] | null
+}
